@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 160" width="640" height="160" fill="none">
+  <defs>
+    <linearGradient id="zLogoBg" x1="16" y1="16" x2="144" y2="144" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#0F172A"/>
+      <stop offset="100%" stop-color="#1E1B4B"/>
+    </linearGradient>
+    <linearGradient id="zLogoGrad" x1="36" y1="36" x2="124" y2="124" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#6366F1"/>
+      <stop offset="55%" stop-color="#3B82F6"/>
+      <stop offset="100%" stop-color="#06B6D4"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Symbol Badge -->
+  <rect x="16" y="16" width="128" height="128" rx="30" fill="url(#zLogoBg)" stroke="#334155" stroke-width="2"/>
+  <path d="M46 48C46 44.6863 48.6863 42 52 42H106C110.22 42 112.699 46.748 110.195 50.1489L66.5 106H104C107.314 106 110 108.686 110 112V114C110 117.314 107.314 120 104 120H50C45.7801 120 43.3012 115.252 45.8054 111.851L89.5 56H52C48.6863 56 46 53.3137 46 50V48Z" fill="url(#zLogoGrad)"/>
+  <circle cx="108" cy="78" r="6.5" fill="#06B6D4"/>
+
+  <!-- Wordmark: Zyvra -->
+  <text x="168" y="96" font-family="'Plus Jakarta Sans', 'Inter', system-ui, -apple-system, sans-serif" font-weight="800" font-size="64" letter-spacing="-1.5" fill="#F8FAFC">Zyvra</text>
+  <circle cx="352" cy="88" r="6" fill="#06B6D4"/>
+  <text x="170" y="126" font-family="'Plus Jakarta Sans', 'Inter', system-ui, -apple-system, sans-serif" font-weight="600" font-size="16" letter-spacing="3.5" fill="#94A3B8">UNIVERSAL EXAM PLATFORM</text>
+</svg>

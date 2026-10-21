@@ -1,0 +1,38 @@
+[
+  {
+    "exam": "SSC CGL",
+    "stage": "Tier-1",
+    "subject": "Quantitative Aptitude",
+    "topic": "Percentage",
+    "pyqTag": "SSC CGL Tier-1 2024 Shift-1",
+    "difficulty": "Moderate",
+    "isPro": false,
+    "question_en": "If the price of sugar increases by 25%, by what percentage must a family reduce its consumption so that the expenditure remains unchanged?",
+    "question_hi": "यदि चीनी के मूल्य में 25% की वृद्धि हो जाती है, तो एक परिवार को अपनी खपत में कितने प्रतिशत की कमी करनी चाहिए ताकि खर्च अपरिवर्तित रहे?",
+    "options_en": ["20%", "25%", "16.67%", "15%"],
+    "options_hi": ["20%", "25%", "16.67%", "15%"],
+    "correctIndex": 0,
+    "basic_en": "Let initial price = 100, new price = 125. Required reduction = (25 / 125) * 100 = 20%.",
+    "basic_hi": "माना प्रारंभिक मूल्य = 100, नया मूल्य = 125। आवश्यक कमी = (25 / 125) × 100 = 20%।",
+    "trick_en": "25% = +1/4 increase -> Reduction is 1/(4+1) = 1/5 = 20%.",
+    "trick_hi": "25% = +1/4 वृद्धि -> खपत में कमी = 1/(4+1) = 1/5 = 20%।"
+  },
+  {
+    "exam": "BPSC TRE",
+    "stage": "PRT / Middle",
+    "subject": "General Awareness & Static GK",
+    "topic": "Bihar Special History",
+    "pyqTag": "BPSC TRE 3.0 Official Paper",
+    "difficulty": "Easy",
+    "isPro": false,
+    "question_en": "Who led the Revolt of 1857 in Bihar (Jagdishpur, Arrah)?",
+    "question_hi": "बिहार (जगदीशपुर, आरा) में 1857 के विद्रोह का नेतृत्व किसने किया था?",
+    "options_en": ["Babu Kunwar Singh", "Peer Ali Khan", "Nana Saheb", "Tatya Tope"],
+    "options_hi": ["बाबू कुंवर सिंह", "पीर अली खान", "नाना साहब", "तात्या टोपे"],
+    "correctIndex": 0,
+    "basic_en": "Babu Kunwar Singh, the Zamindar of Jagdishpur (Bhojpur district), organized and led the 1857 revolt in Bihar.",
+    "basic_hi": "जगदीशपुर (भोजपुर) के जमींदार बाबू कुंवर सिंह ने बिहार में 1857 की क्रांति का प्रमुख नेतृत्व किया।",
+    "trick_en": "Jagdishpur (Bihar) 1857 = Babu Kunwar Singh; Patna City 1857 book-seller = Peer Ali.",
+    "trick_hi": "जगदीशपुर (आरा) = बाबू कुंवर सिंह; पटना सिटी पुस्तक विक्रेता = पीर अली खान।"
+  }
+]

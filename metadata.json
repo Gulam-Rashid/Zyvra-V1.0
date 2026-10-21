@@ -1,0 +1,6 @@
+{
+  "name": "SSC Exam Prep Pro",
+  "description": "Offline-First SSC Exam Preparation Application for SSC CGL, CHSL, MTS, CPO, and GD with 5-Year TCS PYQ Trend Engine, Dual-Method Tricks, Custom Test Builder, PDF Reader, and Admin Control Center.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
