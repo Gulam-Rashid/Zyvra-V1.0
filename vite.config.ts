@@ -23,7 +23,7 @@ export default defineConfig(() => {
           'pwa-maskable-512x512.png',
         ],
         manifest: {
-          id: './',
+          id: basePath,
           name: 'Zyvra — Universal Competitive Exam Preparation Platform',
           short_name: 'Zyvra',
           description:
@@ -31,8 +31,8 @@ export default defineConfig(() => {
           theme_color: '#0A0E17',
           background_color: '#0A0E17',
           display: 'standalone',
-          start_url: './',
-          scope: './',
+          start_url: basePath,
+          scope: basePath,
           icons: [
             {
               src: 'pwa-192x192.png',
