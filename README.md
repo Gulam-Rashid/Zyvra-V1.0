@@ -29,7 +29,7 @@
 
 ### Admin Control Center
 - **Dedicated Admin Login Screen**:
-  - Configured Login ID: `Sajiya@8800`
+  - Configured Login ID: `King`
   - Supports local demo passcode configuration or optional backend JWT authentication via `VITE_API_BASE_URL`.
 - **Full Content Management**:
   - Create, edit, enable/disable, and delete Exam Categories, Exams, Subjects, Chapters, Questions, Study Notes, PDFs, and Flashcards.
@@ -55,7 +55,7 @@ Zyvra uses **Option A (Static Frontend on GitHub Pages + Local Browser/PWA Stora
 ## 3. Security Notice (Static vs. Backend Mode)
 
 - **No Plaintext Password or Secret Committed**: The repository does not store any production password, API key, or GitHub Personal Access Token in source files.
-- **Static Demo Mode Limitation**: When hosted purely as a static site on GitHub Pages without `VITE_API_BASE_URL`, Admin authentication (`Sajiya@8800`) and Pro key generation operate in **Local Browser Demo Mode** (using SHA-256 hashed passcodes in `localStorage`). Any edits made in the Admin Panel in static mode are saved to that browser's local storage unless exported as JSON or pushed to GitHub.
+- **Static Demo Mode Limitation**: When hosted purely as a static site on GitHub Pages without `VITE_API_BASE_URL`, Admin authentication (`King`) and Pro key generation operate in **Local Browser Demo Mode** (using SHA-256 hashed passcodes in `localStorage`). Any edits made in the Admin Panel in static mode are saved to that browser's local storage unless exported as JSON or pushed to GitHub.
 - **Production Multi-User Security**: For real server-enforced Admin security and instant multi-user content updates without redeploying, configure `VITE_API_BASE_URL` to point to a backend server that verifies credentials with `bcrypt`/`argon2` and issues signed JWT tokens.
 
 ---
@@ -113,7 +113,7 @@ npm run preview
 ├── src/
 │   ├── components/
 │   │   ├── ZyvraLogo.tsx          # Reusable SVG brand logo & wordmark component
-│   │   ├── AdminControlCenter.tsx # Admin login (Sajiya@8800) & content CMS
+│   │   ├── AdminControlCenter.tsx # Admin login (King) & content CMS
 │   │   ├── ActiveTestScreen.tsx   # Distraction-free exam engine
 │   │   ├── StudyMaterialModal.tsx # Markdown notes & PDF reader
 │   │   ├── FlashcardsModal.tsx    # Spaced-repetition active recall deck
