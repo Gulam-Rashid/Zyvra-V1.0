@@ -157,6 +157,7 @@ const server = http.createServer((req, res) => {
   sendJson(res, 404, { error: 'Not found' });
 });
 
-server.listen(PORT, () => {
+
+server.listen(PORT, '0.0.0.0', () => {
   console.log(`Zyvra Admin Auth Server listening on port ${PORT}`);
 });
