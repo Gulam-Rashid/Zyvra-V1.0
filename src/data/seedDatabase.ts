@@ -1805,7 +1805,7 @@ PAGE 2: TOP REPEATED IDIOMS & PHRASES
     whatsappNumber: '919876543210',
     razorpayLink: 'https://rzp.io/l/zyvra-pro-pass',
     countdownEndsAt: '2026-10-25T23:59:59Z',
-    adminPin: '2026',
+    adminPin: '',
     passScope: 'universal',
     applicableExamIds: [],
   },

@@ -1,146 +1,86 @@
-# Zyvra — GitHub और GitHub Pages डिप्लॉयमेंट गाइड (हिंदी में)
+# Zyvra — GitHub Pages डिप्लॉयमेंट और एडमिन सुरक्षा (Admin Security) गाइड (सरल हिंदी में)
 
-यह गाइड आपको **Zyvra (Universal Competitive Exam Preparation Platform)** को अपने Windows कंप्यूटर पर चलाने, GitHub पर अपलोड करने और **GitHub Pages** पर बिल्कुल मुफ्त (Free) लाइव होस्ट करने की पूरी प्रक्रिया आसान हिंदी में समझाती है।
-
----
-
-## भाग A (Part A): अपने कंप्यूटर (Windows) पर प्रोजेक्ट तैयार करना
-
-### 1. ज़रूरी सॉफ्टवेयर इंस्टॉल करें
-अपने कंप्यूटर में नीचे दिए गए तीन सॉफ्टवेयर इंस्टॉल कर लें (यदि पहले से इंस्टॉल हैं तो यह स्टेप छोड़ दें):
-1. **Node.js (LTS वर्शन 18 या 20):** [https://nodejs.org](https://nodejs.org) से डाउनलोड और इंस्टॉल करें।
-2. **Git for Windows:** [https://git-scm.com/download/win](https://git-scm.com/download/win) से इंस्टॉल करें।
-3. **VS Code (Visual Studio Code):** [https://code.visualstudio.com](https://code.visualstudio.com) से इंस्टॉल करें।
-
-### 2. प्रोजेक्ट फोल्डर को VS Code में खोलें
-1. अपने कंप्यूटर में **Zyvra** प्रोजेक्ट के ज़िप (ZIP) फोल्डर को Extract करें।
-2. **VS Code** खोलें -> ऊपर **File > Open Folder** पर क्लिक करें और अपना प्रोजेक्ट फोल्डर चुनें।
-3. VS Code में टर्मिनल खोलने के लिए कीबोर्ड पर **`Ctrl + ~`** (Ctrl और Backtick बटन) दबाएँ या ऊपर मेनू से **Terminal > New Terminal** चुनें।
-
-### 3. प्रोजेक्ट को लोकल कंप्यूटर पर चलाकर देखें
-टर्मिनल में नीचे दिए गए कमांड एक-एक करके टाइप करें और `Enter` दबाएँ:
-
-```powershell
-# 1. सभी ज़रूरी पैकेज (Dependencies) इंस्टॉल करें
-npm install
-
-# 2. लोकल डेवलपमेंट सर्वर शुरू करें
-npm run dev
-```
-- अब आपके टर्मिनल में `http://localhost:3000` दिखाई देगा। इसे अपने ब्राउज़र (Chrome/Edge) में खोलें।
-
-### 4. प्रोडक्शन बिल्ड (Build) चेक करें
-GitHub पर अपलोड करने से पहले यह जाँच लें कि प्रोजेक्ट बिना किसी एरर के बिल्ड हो रहा है:
-
-```powershell
-npm run build
-```
-- यह कमांड चलने के बाद आपके प्रोजेक्ट में `dist` नाम का फोल्डर बन जाएगा।
-
-### 5. ध्यान दें: कौन सी फाइलें GitHub पर अपलोड नहीं करनी हैं?
-प्रोजेक्ट में `.gitignore` फाइल पहले से सेट है। यह अपने आप इन फाइलों को रोक देगी:
-- `node_modules/` (यह बहुत बड़ा फोल्डर होता है, इसे कभी अपलोड न करें)
-- `.env` या `.env.local` (इसमें आपके प्राइवेट सीक्रेट या पासवर्ड होते हैं)
-- `dist/` (GitHub Actions इसे अपने आप बनाएगा)
+यह गाइड आपको **Zyvra (Universal Competitive Exam Preparation Platform)** के नए **Admin Authentication Security Upgrade**, पासकोड सेटअप/रीसेट प्रक्रिया और प्रोडक्शन बैकएंड आर्किटेक्चर को सरल हिंदी में समझाती है।
 
 ---
 
-## भाग B (Part B): GitHub पर नया Repository बनाना और कोड अपलोड करना
+## 1. एडमिन पैनल (Admin Control Center) कैसे खोलें? (गुप्त 5-टैप तरीका)
 
-### 1. GitHub पर नया Repository बनाएँ
-1. [https://github.com](https://github.com) पर लॉग इन करें।
-2. ऊपर दाईं तरफ **`+`** आइकन पर क्लिक करें और **New repository** चुनें।
-3. **Repository name** में लिखें: `zyvra` (या अपनी पसंद का नाम)।
-4. इसे **Public** रखें (मुफ्त GitHub Pages के लिए Public होना ज़रूरी है)।
-5. *Add a README file* या *.gitignore* पर टिक **न करें** (क्योंकि ये हमारे प्रोजेक्ट में पहले से मौजूद हैं)।
-6. **Create repository** बटन पर क्लिक करें।
+छात्रों की सुरक्षा के लिए अब **Profile** पेज या फुटर में कहीं भी `"Administrator Login"` का पब्लिक बटन या लिंक **नहीं** दिखता है, और न ही कोई एडमिन आईडी (`Sajiya@8800`) स्क्रीन पर दिखाई देती है।
 
-### 2. अपने कंप्यूटर से कोड GitHub पर भेजें (Push करें)
-VS Code के टर्मिनल में नीचे दिए गए कमांड क्रम से चलाएँ:
-
-```powershell
-# 1. Git शुरू करें
-git init
-
-# 2. सभी फाइलों को स्टेज करें
-git add .
-
-# 3. पहला कमिट (Commit) बनाएँ
-git commit -m "Initial production release of Zyvra"
-
-# 4. मुख्य ब्रांच का नाम main रखें
-git branch -M main
-
-# 5. अपने GitHub Repository का लिंक जोड़ें (नीचे अपने GitHub यूज़रनेम और रिपॉजिटरी का नाम बदलें)
-git remote add origin https://github.com/YOUR_USERNAME/zyvra.git
-
-# 6. कोड को GitHub पर अपलोड (Push) करें
-git push -u origin main
-```
+**एडमिन लॉगिन बॉक्स खोलने का गुप्त तरीका (Discreet Entry Flow):**
+1. ऐप में नीचे या ऊपर के नेविगेशन से **Profile (प्रोफ़ाइल)** टैब पर जाएँ।
+2. प्रोफ़ाइल कार्ड के बाईं ओर (या नीचे फुटर में) बने **Zyvra Logo** पर **लगातार 5 बार (3 सेकंड के अंदर) टैप/क्लिक करें**।
+3. 5 बार टैप करते ही **Administrator Authentication** डायलॉग खुल जाएगा।
 
 ---
 
-## भाग C (Part C): वेबसाइट को लाइव (Host) करना
+## 2. एडमिन आईडी और पासकोड कैसे सेट या रीसेट करें? (Static GitHub Pages मोड)
 
-### विकल्प 1 (अनुशंसित): केवल GitHub Pages पर होस्टिंग (100% Free)
-हमने प्रोजेक्ट में `.github/workflows/deploy.yml` फाइल पहले से बना दी है, जो आपके ऐप को अपने आप बिल्ड और पब्लिश कर देगी। बस यह एक सेटिंग करें:
+### A. पहली बार एडमिन आईडी और पासकोड बनाना (First-Time Owner Setup)
+जब आप पहली बार अपने ब्राउज़र में 5-टैप करके एडमिन बॉक्स खोलेंगे:
+1. आपको **First-Time Owner Setup (Create Owner Admin Credentials)** स्क्रीन दिखेगी।
+2. यहाँ अपनी पसंद का **New Admin Login ID** (कम से कम 4 अक्षर) और **New Administrator Passcode** (कम से कम 6 अक्षर) डालें और **Initialize & Sign In** पर क्लिक करें।
+3. आपका लॉगिन आईडी और पासकोड सुरक्षित **Salted SHA-256 Hash** के रूप में आपके ब्राउज़र में सेव हो जाएगा (कोड में कोई भी पासवर्ड हार्डकोड नहीं है)।
 
-1. अपने GitHub Repository पेज पर जाएँ।
-2. ऊपर **Settings** टैब पर क्लिक करें।
-3. बाईं तरफ के मेनू में **Pages** पर क्लिक करें।
-4. **Build and deployment** के नीचे **Source** ड्रॉपडाउन में **`GitHub Actions`** चुनें।
-5. अब ऊपर **Actions** टैब पर क्लिक करें। आप देखेंगे कि **"Deploy Zyvra to GitHub Pages"** वर्कफ़्लो चल रहा है।
-6. 1–2 मिनट में जब उस पर हरा टिक (Green Checkmark) आ जाए, तो आपकी वेबसाइट लाइव हो जाएगी!
-7. आपकी लाइव वेबसाइट का लिंक ऐसा होगा:
-   `https://YOUR_USERNAME.github.io/zyvra/`
+### B. यदि आप अपना लोकल पासकोड भूल गए हैं तो उसे रीसेट कैसे करें? (Owner Credential Reset)
+बिना किसी छात्र के डेटा, टेस्ट हिस्ट्री या प्रश्न बैंक (`zyvra_master_db_v3`) को नुकसान पहुँचाए आप दो सुरक्षित तरीकों से अपना एडमिन पासकोड रीसेट कर सकते हैं:
 
----
+#### तरीका 1: GitHub Personal Access Token (PAT) द्वारा वेरिफिकेशन (अनुशंसित)
+1. 5-टैप करके एडमिन डायलॉग खोलें और **Owner Credential Reset** टैब पर क्लिक करें।
+2. **Connected GitHub Repository** में अपने रिपॉजिटरी का नाम लिखें (जैसे: `username/Zyvra-V1.0`)।
+3. **GitHub Personal Access Token** में अपना GitHub PAT (`ghp_...`) डालें।
+4. अपना **New Admin Login ID** और **New Administrator Passcode** डालकर **Verify & Reset Credentials** पर क्लिक करें।
+5. ऐप सीधे GitHub API से जाँच करेगा कि आप इस रिपॉजिटरी के असली मालिक (Owner) हैं और तुरंत आपका नया पासकोड सेट कर देगा।
 
-## भाग D (Part D): बैकएंड और डेटाबेस सेटअप (यदि आप मल्टी-यूज़र क्लाउड सिंक चाहते हैं)
-
-Zyvra दो तरीकों से काम करता है:
-
-### 1. लोकल / GitHub डायरेक्ट सिंक मोड (बिना अलग सर्वर के)
-- डिफ़ॉल्ट रूप से Zyvra का सारा डेटा `seedDatabase.ts` और ब्राउज़र के `localStorage` / `IndexedDB` में सुरक्षित रहता है।
-- **सभी छात्रों के लिए नया कंटेंट लाइव करने का तरीका:**
-  1. एडमिन पैनल (`Admin` बटन) खोलें और लॉग इन करें (`Sajiya@8800`)।
-  2. नए प्रश्न (CSV/JSON), परीक्षा या नोट्स जोड़ें।
-  3. **Cloud Sync / Backup** टैब में जाकर **Export JSON Backup** पर क्लिक करें और डाउनलोड हुई फाइल को अपने प्रोजेक्ट के `public/database.json` के रूप में सेव करके GitHub पर Push कर दें—या सीधे एडमिन पैनल में अपना GitHub Personal Access Token (PAT) डालकर **Push to GitHub** बटन दबाएँ।
-
-### 2. एक्सटर्नल बैकएंड मोड (Render / Railway / Supabase)
-यदि आप चाहते हैं कि एडमिन पासवर्ड सर्वर पर चेक हो (`JWT Auth`):
-1. अपने बैकएंड सर्वर को Render या Railway पर होस्ट करें।
-2. `.env` फाइल में `VITE_API_BASE_URL="https://your-backend-api.onrender.com"` सेट करें।
-3. ऐप अपने आप `/api/admin/login` के ज़रिए सर्वर से ऑथेंटिकेशन करेगा।
+#### तरीका 2: अपने कंप्यूटर/मोबाइल ब्राउज़र के Console से लोकल रीसेट
+यदि आप अपने ही लैपटॉप पर हैं और तुरंत लोकल क्रेडेंशियल रीसेट करना चाहते हैं:
+1. ब्राउज़र में `F12` दबाकर **Developer Tools -> Console** खोलें।
+2. नीचे दी गई कमांड चलाएँ:
+   ```javascript
+   localStorage.removeItem('zyvra_admin_cred_v2');
+   localStorage.removeItem('zyvra_admin_passcode_hash_v1');
+   ```
+3. पेज रीफ्रेश करें और Zyvra लोगो पर 5 बार टैप करें — अब आपको फिर से **First-Time Owner Setup** स्क्रीन मिल जाएगी। (इससे आपका कोई भी प्रश्न या छात्र डेटा डिलीट नहीं होगा)।
 
 ---
 
-## भाग E (Part E): लाइव होने के बाद जाँच (Verification Checklist)
+## 3. स्टैटिक GitHub Pages की सीमा और प्रोडक्शन बैकएंड आर्किटेक्चर (सरल हिंदी में)
 
-जब आपकी वेबसाइट लाइव हो जाए, तो नीचे दी गई चीज़ें ज़रूर चेक करें:
+### स्टैटिक होस्टिंग की सच्चाई (Static Frontend Limitation)
+- **GitHub Pages** केवल स्टैटिक फाइलें (HTML, CSS, JavaScript) होस्ट करता है।
+- स्टैटिक वेबसाइट का सारा कोड यूज़र के ब्राउज़र में डाउनलोड होता है, इसलिए केवल फ्रंटएंड (`localStorage`) में रखा गया लॉगिन केवल आपके अपने ब्राउज़र/डिवाइस की सुरक्षा के लिए होता है — यह किसी पब्लिक सर्वर की तरह 100% अभेद्य सुरक्षा (True Server Security Boundary) नहीं दे सकता।
+- कभी भी `VITE_` वाले एनवायरनमेंट वेरिएबल्स में अपना एडमिन पासवर्ड या सीक्रेट न रखें, क्योंकि `VITE_` वेरिएबल्स बिल्ड होते समय पब्लिक JavaScript बंडल में शामिल हो जाते हैं।
 
-1. **वेबसाइट और लोगो:**
-   - क्या वेबसाइट मोबाइल और लैपटॉप दोनों पर सही खुल रही है?
-   - क्या ऊपर **Zyvra** का नया लोगो और नाम दिख रहा है?
-2. **परीक्षा और टेस्ट इंजन (Test Engine):**
-   - ऊपर से अलग-अलग परीक्षाएँ (जैसे **SSC CGL, BPSC TRE, Bihar Daroga, Railway NTPC**) बदलकर देखें।
-   - **Start Mock** या **Custom Test** पर क्लिक करके एक टेस्ट दें, भाषा (English/Hindi) बदलें और टेस्ट सबमिट करके रिज़ल्ट तथा **15-Second Trick** देखें।
-3. **एडमिन पैनल (Admin Panel) और लॉगिन:**
-   - ऊपर दाईं तरफ **Admin** बटन (या फुटर में बैज पर 5 बार टैप) करें।
-   - **Admin Login ID** में `Sajiya@8800` पहले से भरा मिलेगा। पहली बार अपना लोकल पासकोड सेट करें और लॉग इन करें।
-   - **Questions** टैब में जाकर **Sample CSV** या **Sample JSON** डाउनलोड करें और उसे अपलोड करके देखें।
-4. **मोबाइल ऐप इंस्टॉलेशन (PWA Install) और ऑफलाइन मोड:**
-   - मोबाइल के Chrome ब्राउज़र में वेबसाइट खोलें और हेडर में दिख रहे **Install App** बटन पर क्लिक करके ऐप को होम स्क्रीन पर इंस्टॉल करें।
-   - इंटरनेट बंद करने पर ऊपर **Offline Mode Active** बैनर दिखाई देगा और पहले से लोड किए गए प्रश्न व नोट्स बिना इंटरनेट के भी काम करेंगे।
+### असली प्रोडक्शन बैकएंड कैसे लगाएँ? (`server.mjs` का उपयोग)
+हमने प्रोजेक्ट की रूट डायरेक्टरी में **`server.mjs`** नाम का एक तैयार प्रोडक्शन बैकएंड सर्वर दिया है। इसमें:
+- **Salted `scrypt` Password Hashing** और **Timing-Safe Comparison** है।
+- **Brute-Force Rate Limiting** (5 गलत प्रयासों पर 60 सेकंड का लॉकआउट) है।
+- **HMAC-SHA256 Signed Session Token** और **HttpOnly Secure Cookie** की सुविधा है।
+
+#### बैकएंड सर्वर को चालू करने के स्टेप्स:
+1. **अपने पासवर्ड का सुरक्षित Hash बनाएँ:**
+   टर्मिनल में यह कमांड चलाएँ:
+   ```bash
+   node server.mjs --hash "ApnaStrongPasswordYahanLikhein"
+   ```
+   यह आपको `ADMIN_PASSWORD_HASH="salt:hash"` आउटपुट देगा।
+
+2. **बैकएंड सर्वर (Render / Railway / VPS) पर Environment Variables सेट करें:**
+   अपने बैकएंड सर्वर की सेटिंग्स में ये वेरिएबल्स जोड़ें (इन्हें कभी भी GitHub में कमिट न करें):
+   ```env
+   ADMIN_LOGIN_ID="आपकी_गुप्त_एडमिन_आईडी"
+   ADMIN_PASSWORD_HASH="ऊपर_मिला_हुआ_साल्ट_और_हैश"
+   ADMIN_SESSION_SECRET="कोई_भी_लंबी_रैंडम_सीक्रेट_स्ट्रिंग"
+   ALLOWED_ORIGIN="https://your-username.github.io"
+   ```
+
+3. **फ्रंटएंड को बैकएंड से जोड़ें:**
+   जब आपका `server.mjs` किसी क्लाउड सर्वर (जैसे Render या Railway) पर लाइव हो जाए, तो केवल उसका पब्लिक URL अपने फ्रंटएंड के `VITE_API_BASE_URL` में डालें। इसके बाद Zyvra का एडमिन पैनल सीधे सर्वर से वेरिफाई होकर ही खुलेगा।
 
 ---
 
-### भविष्य में ऐप को अपडेट कैसे करें?
-जब भी आप अपने कंप्यूटर पर कोड या डेटा में कोई बदलाव करें, बस टर्मिनल में ये 3 कमांड चलाएँ:
+## 4. GitHub Pages पर ऑटोमैटिक डिप्लॉयमेंट (`.github/workflows/deploy.yml`)
 
-```powershell
-git add .
-git commit -m "Updated exam questions and features"
-git push
-```
-GitHub Actions अपने आप 1 मिनट के अंदर आपकी लाइव वेबसाइट को अपडेट कर देगा!
+1. प्रोजेक्ट में `package-lock.json` और `.github/workflows/deploy.yml` पहले से सही बेस पाथ (`/Zyvra-V1.0/`) के साथ तैयार हैं।
+2. जब भी आप कोड को GitHub पर Push या Sync करेंगे, GitHub Actions अपने आप `npm ci` और `npm run build` चलाकर `dist` फोल्डर को GitHub Pages पर पब्लिश कर देगा।

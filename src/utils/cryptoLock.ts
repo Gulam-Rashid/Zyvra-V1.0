@@ -1,7 +1,8 @@
 const MASTER_SECRET_SALT = 'SSC_PRO_TCS_MASTER_SALT_2026_V9';
 const DEVICE_TOKEN_STORAGE_KEY = 'ssc_prep_hardware_install_token_v1';
 const ADMIN_SESSION_STORAGE_KEY = 'zyvra_admin_session_v1';
-const ADMIN_CUSTOM_HASH_KEY = 'zyvra_admin_passcode_hash_v1';
+const ADMIN_CRED_STORAGE_KEY = 'zyvra_admin_cred_v2';
+const ADMIN_LOCKOUT_STORAGE_KEY = 'zyvra_admin_lockout_v1';
 
 /**
  * Generates or retrieves a persistent hardware signature component combined with
@@ -149,19 +150,52 @@ export function verifyProKeyForDevice(
 }
 
 // ============================================================================
-// ADMIN AUTHENTICATION & SESSION MANAGEMENT (Login ID: Sajiya@8800)
+// ADMIN AUTHENTICATION & SESSION MANAGEMENT
+// No hardcoded login IDs or passcodes are stored in frontend source code.
 // ============================================================================
-export const DEFAULT_ADMIN_LOGIN_ID =
-  (typeof import.meta !== 'undefined' &&
-    (import.meta as unknown as { env?: Record<string, string> }).env?.VITE_ADMIN_LOGIN_ID) ||
-  'Sajiya@8800';
 
 export interface AdminSession {
   loginId: string;
-  mode: 'backend_jwt' | 'local_demo';
+  mode: 'backend_jwt' | 'local_owner';
   token?: string;
   authenticatedAt: string;
   expiresAt: number;
+}
+
+interface StoredAdminCredentialRecord {
+  version: 2;
+  salt: string;
+  loginIdHash: string;
+  passcodeHash: string;
+  updatedAt: string;
+}
+
+interface AdminLockoutState {
+  failedAttempts: number;
+  lockedUntil: number;
+}
+
+function generateRandomHexSalt(bytesLength = 16): string {
+  if (typeof window !== 'undefined' && window.crypto?.getRandomValues) {
+    const arr = new Uint8Array(bytesLength);
+    window.crypto.getRandomValues(arr);
+    return Array.from(arr, (b) => b.toString(16).padStart(2, '0')).join('');
+  }
+  return `${Date.now().toString(16)}-${Math.random().toString(16).slice(2)}`;
+}
+
+async function computeSha256Hex(message: string): Promise<string> {
+  if (typeof window !== 'undefined' && window.crypto?.subtle) {
+    const encoder = new TextEncoder();
+    const data = encoder.encode(message);
+    const hashBuffer = await window.crypto.subtle.digest('SHA-256', data);
+    const hashArray = Array.from(new Uint8Array(hashBuffer));
+    return hashArray.map((b) => b.toString(16).padStart(2, '0')).join('');
+  }
+  // Fallback deterministic multi-round hash if Web Crypto is unavailable
+  const h1 = computeDeterministicHash(`R1::${message}`).toString(16);
+  const h2 = computeDeterministicHash(`R2::${message.split('').reverse().join('')}`).toString(16);
+  return `${h1}-${h2}`;
 }
 
 export function getActiveAdminSession(): AdminSession | null {
@@ -190,54 +224,229 @@ export function clearAdminSession(): void {
   sessionStorage.removeItem(ADMIN_SESSION_STORAGE_KEY);
 }
 
-export function setLocalAdminPasscode(newPasscode: string): void {
-  if (typeof window === 'undefined') return;
-  const hash = String(computeDeterministicHash(`ZYVRA_ADMIN_PASS::${newPasscode.trim()}`));
-  localStorage.setItem(ADMIN_CUSTOM_HASH_KEY, hash);
+/**
+ * Checks whether local owner credentials have been initialized on this browser.
+ */
+export function hasLocalAdminCredentials(): boolean {
+  if (typeof window === 'undefined') return false;
+  try {
+    const raw = localStorage.getItem(ADMIN_CRED_STORAGE_KEY);
+    if (!raw) return false;
+    const parsed = JSON.parse(raw) as StoredAdminCredentialRecord;
+    return Boolean(parsed && parsed.salt && parsed.loginIdHash && parsed.passcodeHash);
+  } catch {
+    return false;
+  }
 }
 
-export function verifyLocalAdminPasscode(
+/**
+ * Returns remaining lockout seconds if failed login attempts exceeded threshold.
+ */
+export function getAdminLockoutRemainingSeconds(): number {
+  if (typeof window === 'undefined') return 0;
+  try {
+    const raw = sessionStorage.getItem(ADMIN_LOCKOUT_STORAGE_KEY);
+    if (!raw) return 0;
+    const state = JSON.parse(raw) as AdminLockoutState;
+    if (state.lockedUntil && Date.now() < state.lockedUntil) {
+      return Math.ceil((state.lockedUntil - Date.now()) / 1000);
+    }
+    return 0;
+  } catch {
+    return 0;
+  }
+}
+
+function recordFailedAdminAttempt(): { remainingBeforeLock: number; lockedSeconds: number } {
+  if (typeof window === 'undefined') return { remainingBeforeLock: 5, lockedSeconds: 0 };
+  try {
+    const raw = sessionStorage.getItem(ADMIN_LOCKOUT_STORAGE_KEY);
+    const current: AdminLockoutState = raw
+      ? JSON.parse(raw)
+      : { failedAttempts: 0, lockedUntil: 0 };
+    const nextAttempts = (current.failedAttempts || 0) + 1;
+    if (nextAttempts >= 5) {
+      const lockedUntil = Date.now() + 60 * 1000;
+      sessionStorage.setItem(
+        ADMIN_LOCKOUT_STORAGE_KEY,
+        JSON.stringify({ failedAttempts: 0, lockedUntil })
+      );
+      return { remainingBeforeLock: 0, lockedSeconds: 60 };
+    }
+    sessionStorage.setItem(
+      ADMIN_LOCKOUT_STORAGE_KEY,
+      JSON.stringify({ failedAttempts: nextAttempts, lockedUntil: 0 })
+    );
+    return { remainingBeforeLock: Math.max(0, 5 - nextAttempts), lockedSeconds: 0 };
+  } catch {
+    return { remainingBeforeLock: 3, lockedSeconds: 0 };
+  }
+}
+
+function clearFailedAdminAttempts(): void {
+  if (typeof window === 'undefined') return;
+  sessionStorage.removeItem(ADMIN_LOCKOUT_STORAGE_KEY);
+}
+
+/**
+ * Initializes or updates the local owner Admin Login ID and Passcode using salted SHA-256 hashing.
+ */
+export async function initializeOrUpdateLocalAdminCredentials(
+  loginId: string,
+  passcode: string
+): Promise<{ ok: boolean; error?: string }> {
+  if (typeof window === 'undefined') {
+    return { ok: false, error: 'Browser storage unavailable.' };
+  }
+  const cleanId = loginId.trim();
+  const cleanPass = passcode.trim();
+
+  if (cleanId.length < 4) {
+    return { ok: false, error: 'Admin Login ID must be at least 4 characters.' };
+  }
+  if (cleanPass.length < 6) {
+    return { ok: false, error: 'Admin Passcode must be at least 6 characters.' };
+  }
+
+  const salt = generateRandomHexSalt(16);
+  const loginIdHash = await computeSha256Hex(`ZYVRA_ID_V2::${salt}::${cleanId}`);
+  const passcodeHash = await computeSha256Hex(`ZYVRA_PASS_V2::${salt}::${cleanPass}`);
+
+  const record: StoredAdminCredentialRecord = {
+    version: 2,
+    salt,
+    loginIdHash,
+    passcodeHash,
+    updatedAt: new Date().toISOString(),
+  };
+
+  localStorage.setItem(ADMIN_CRED_STORAGE_KEY, JSON.stringify(record));
+  clearFailedAdminAttempts();
+  return { ok: true };
+}
+
+/**
+ * Verifies entered Admin Login ID and Passcode against the stored salted SHA-256 hashes.
+ */
+export async function verifyLocalAdminCredentials(
   enteredLoginId: string,
-  enteredPasscode: string,
-  fallbackDbPin: string = '2026'
-): { ok: boolean; error?: string } {
+  enteredPasscode: string
+): Promise<{ ok: boolean; error?: string }> {
+  const lockSec = getAdminLockoutRemainingSeconds();
+  if (lockSec > 0) {
+    return {
+      ok: false,
+      error: `Too many failed attempts. Please wait ${lockSec}s before trying again.`,
+    };
+  }
+
   const cleanId = enteredLoginId.trim();
   const cleanPass = enteredPasscode.trim();
 
-  if (cleanId !== DEFAULT_ADMIN_LOGIN_ID) {
+  if (!cleanId || !cleanPass) {
     return {
       ok: false,
-      error: 'Invalid Administrator Login ID. Access is restricted to authorized administrators.',
+      error: 'Both Admin Login ID and Passcode are required.',
     };
   }
 
-  if (!cleanPass) {
+  if (typeof window === 'undefined') {
+    return { ok: false, error: 'Window environment unavailable.' };
+  }
+
+  const raw = localStorage.getItem(ADMIN_CRED_STORAGE_KEY);
+  if (!raw) {
     return {
       ok: false,
-      error: 'Please enter the Administrator Passcode.',
+      error: 'Administrator credentials have not been initialized on this device yet.',
     };
   }
 
-  const customHash =
-    typeof window !== 'undefined' ? localStorage.getItem(ADMIN_CUSTOM_HASH_KEY) : null;
-  const enteredHash = String(computeDeterministicHash(`ZYVRA_ADMIN_PASS::${cleanPass}`));
+  try {
+    const stored = JSON.parse(raw) as StoredAdminCredentialRecord;
+    const candidateIdHash = await computeSha256Hex(`ZYVRA_ID_V2::${stored.salt}::${cleanId}`);
+    const candidatePassHash = await computeSha256Hex(`ZYVRA_PASS_V2::${stored.salt}::${cleanPass}`);
 
-  if (customHash) {
-    if (enteredHash === customHash) {
+    if (candidateIdHash === stored.loginIdHash && candidatePassHash === stored.passcodeHash) {
+      clearFailedAdminAttempts();
       return { ok: true };
     }
+
+    const attemptInfo = recordFailedAdminAttempt();
+    if (attemptInfo.lockedSeconds > 0) {
+      return {
+        ok: false,
+        error: `Invalid credentials. Account locked for ${attemptInfo.lockedSeconds} seconds due to repeated failed attempts.`,
+      };
+    }
+
     return {
       ok: false,
-      error: 'Incorrect Administrator Passcode.',
+      error: `Invalid Administrator Login ID or Passcode (${attemptInfo.remainingBeforeLock} attempt${
+        attemptInfo.remainingBeforeLock === 1 ? '' : 's'
+      } remaining).`,
+    };
+  } catch {
+    return {
+      ok: false,
+      error: 'Corrupted credential store. Use Owner Credential Reset to re-initialize.',
+    };
+  }
+}
+
+/**
+ * Verifies repository write/admin ownership via GitHub REST API before allowing
+ * an owner-controlled local Admin credential reset on static GitHub Pages deployments.
+ */
+export async function verifyGitHubRepoOwnershipForReset(
+  repoFullName: string,
+  githubPat: string
+): Promise<{ ok: boolean; error?: string }> {
+  const cleanRepo = repoFullName.trim().replace(/^https?:\/\/github\.com\//i, '').replace(/\.git$/i, '').replace(/^\/+|\/+$/g, '');
+  const cleanPat = githubPat.trim();
+
+  if (!cleanRepo || !cleanRepo.includes('/')) {
+    return {
+      ok: false,
+      error: 'Enter your GitHub repository in owner/repo format (e.g., username/Zyvra-V1.0).',
+    };
+  }
+  if (!cleanPat || cleanPat.length < 10) {
+    return {
+      ok: false,
+      error: 'Enter a valid GitHub Personal Access Token (PAT) with repo access.',
     };
   }
 
-  if (cleanPass === fallbackDbPin) {
-    return { ok: true };
-  }
+  try {
+    const res = await fetch(`https://api.github.com/repos/${cleanRepo}`, {
+      headers: {
+        Accept: 'application/vnd.github+json',
+        Authorization: `Bearer ${cleanPat}`,
+      },
+    });
 
-  return {
-    ok: false,
-    error: 'Incorrect Administrator Passcode.',
-  };
+    if (!res.ok) {
+      return {
+        ok: false,
+        error: `GitHub verification failed (HTTP ${res.status}). Check your repository name and PAT.`,
+      };
+    }
+
+    const data = await res.json();
+    const hasWriteAccess = Boolean(data?.permissions?.admin || data?.permissions?.push);
+    if (!hasWriteAccess) {
+      return {
+        ok: false,
+        error: 'The provided token does not have admin or push permissions for this repository.',
+      };
+    }
+
+    return { ok: true };
+  } catch {
+    return {
+      ok: false,
+      error: 'Network error while contacting GitHub API. Check your internet connection.',
+    };
+  }
 }

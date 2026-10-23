@@ -560,9 +560,13 @@ export function App() {
     });
   };
 
-  // Unobtrusive 5-Tap Admin Trigger
+  // Discreet 5-Tap Gesture on Zyvra Logo in Profile Area (Discovery mechanism only)
+  const [lastAdminTapTime, setLastAdminTapTime] = useState<number>(0);
   const handleVersionTap = () => {
-    const next = adminTapCount + 1;
+    const now = Date.now();
+    const withinWindow = now - lastAdminTapTime < 3000;
+    const next = withinWindow ? adminTapCount + 1 : 1;
+    setLastAdminTapTime(now);
     if (next >= 5) {
       setAdminTapCount(0);
       setShowAdminModal(true);
@@ -2241,14 +2245,23 @@ export function App() {
               }`}
             >
               <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-center">
-                <div>
-                  <span className="text-xs font-bold uppercase tracking-wider text-indigo-400">
-                    Zyvra Student Account & Device ID
-                  </span>
-                  <h1 className="mt-1 text-xl font-bold">{studentState.studentName}</h1>
-                  <p className="text-xs text-slate-400 tabular-nums">
-                    Registered Mobile: +91 {studentState.mobileNumber}
-                  </p>
+                <div className="flex items-start gap-3.5">
+                  <div
+                    onClick={handleVersionTap}
+                    role="presentation"
+                    className="shrink-0 select-none pt-0.5 cursor-default"
+                  >
+                    <ZyvraLogo size="sm" showTagline={false} />
+                  </div>
+                  <div>
+                    <span className="text-xs font-bold uppercase tracking-wider text-indigo-400">
+                      Zyvra Student Account & Device ID
+                    </span>
+                    <h1 className="mt-1 text-xl font-bold">{studentState.studentName}</h1>
+                    <p className="text-xs text-slate-400 tabular-nums">
+                      Registered Mobile: +91 {studentState.mobileNumber}
+                    </p>
+                  </div>
                 </div>
 
                 <div className="flex flex-wrap items-center gap-2">
@@ -2372,25 +2385,22 @@ export function App() {
               )}
             </section>
 
-            {/* Unobtrusive Footer with 5-Tap & Direct Admin Login Link */}
+            {/* Student Footer (Discreet 5-tap on Zyvra Logo; no public Admin link) */}
             <footer className="border-t pt-6 text-center border-white/10">
               <div className="flex flex-col items-center justify-center gap-2">
-                <ZyvraLogo size="sm" showTagline={false} />
-                <button
-                  type="button"
+                <div
                   onClick={handleVersionTap}
-                  className="rounded-xl px-4 py-1 text-xs text-slate-500 transition hover:text-slate-300"
+                  role="presentation"
+                  className="select-none cursor-default"
+                >
+                  <ZyvraLogo size="sm" showTagline={false} />
+                </div>
+                <p
+                  onClick={handleVersionTap}
+                  className="select-none rounded-xl px-4 py-1 text-xs text-slate-500 cursor-default"
                 >
                   Zyvra Universal Competitive Exam Platform · v{db.version}
-                  {adminTapCount > 0 && ` · (${5 - adminTapCount} taps to Admin)`}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setShowAdminModal(true)}
-                  className="text-[11px] font-medium text-slate-500 underline-offset-4 hover:text-slate-300 hover:underline"
-                >
-                  Administrator Login
-                </button>
+                </p>
               </div>
             </footer>
           </div>

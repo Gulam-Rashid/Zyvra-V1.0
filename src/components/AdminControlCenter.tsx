@@ -47,12 +47,13 @@ import {
 import {
   AdminSession,
   clearAdminSession,
-  DEFAULT_ADMIN_LOGIN_ID,
   generateProKey,
   getActiveAdminSession,
+  hasLocalAdminCredentials,
+  initializeOrUpdateLocalAdminCredentials,
   saveAdminSession,
-  setLocalAdminPasscode,
-  verifyLocalAdminPasscode,
+  verifyGitHubRepoOwnershipForReset,
+  verifyLocalAdminCredentials,
 } from '../utils/cryptoLock';
 import {
   computeQuestionFingerprint,
@@ -116,17 +117,27 @@ export const AdminControlCenter: React.FC<AdminControlCenterProps> = ({
 }) => {
   const isDark = theme === 'dark';
 
-  // Admin Session & Login State (Login ID: Sajiya@8800)
+  // Admin Session & Login State (No hardcoded Login ID or Passcode)
   const [adminSession, setAdminSession] = useState<AdminSession | null>(() =>
     getActiveAdminSession()
   );
-  const [loginIdInput, setLoginIdInput] = useState(DEFAULT_ADMIN_LOGIN_ID);
+  const [isLocalCredInitialized, setIsLocalCredInitialized] = useState<boolean>(() =>
+    hasLocalAdminCredentials()
+  );
+  const [authDialogMode, setAuthDialogMode] = useState<'signin' | 'setup' | 'recovery'>(() =>
+    hasLocalAdminCredentials() ? 'signin' : 'setup'
+  );
+  const [loginIdInput, setLoginIdInput] = useState('');
   const [passcodeInput, setPasscodeInput] = useState('');
+  const [passcodeConfirmInput, setPasscodeConfirmInput] = useState('');
+  const [recoveryRepoInput, setRecoveryRepoInput] = useState('');
+  const [recoveryPatInput, setRecoveryPatInput] = useState('');
   const [loginError, setLoginError] = useState('');
-  const [failedAttempts, setFailedAttempts] = useState(0);
+  const [loginSuccessMsg, setLoginSuccessMsg] = useState('');
   const [loginBusy, setLoginBusy] = useState(false);
 
-  // Passcode Update State inside Security Tab
+  // Credentials Update State inside Security Tab
+  const [newAdminLoginId, setNewAdminLoginId] = useState('');
   const [newAdminPasscode, setNewAdminPasscode] = useState('');
 
   // Navigation & Status
@@ -311,17 +322,13 @@ export const AdminControlCenter: React.FC<AdminControlCenterProps> = ({
   }, [db.questions, qFilterExam, qFilterSubject, qSearch]);
 
   // ============================================================================
-  // ADMIN AUTHENTICATION HANDLERS (Login ID: Sajiya@8800)
+  // ADMIN AUTHENTICATION HANDLERS (Backend API + Salted Local Owner Auth)
   // ============================================================================
   const handleAdminLogin = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (failedAttempts >= 5) {
-      setLoginError('Too many failed login attempts. Please close and reopen the Admin dialog.');
-      return;
-    }
-
     setLoginBusy(true);
     setLoginError('');
+    setLoginSuccessMsg('');
 
     // Path 1: Production Backend Authentication when VITE_API_BASE_URL is configured
     if (apiBaseUrl.trim()) {
@@ -335,8 +342,8 @@ export const AdminControlCenter: React.FC<AdminControlCenterProps> = ({
           }),
         });
         if (!res.ok) {
-          setFailedAttempts((c) => c + 1);
-          setLoginError('Backend authentication failed: Invalid credentials.');
+          const errData = await res.json().catch(() => ({}));
+          setLoginError(errData.error || 'Backend authentication failed: Invalid credentials.');
           setLoginBusy(false);
           return;
         }
@@ -360,23 +367,75 @@ export const AdminControlCenter: React.FC<AdminControlCenterProps> = ({
       }
     }
 
-    // Path 2: Local Demonstration Mode (for Static / GitHub Pages use)
-    const check = verifyLocalAdminPasscode(
-      loginIdInput,
-      passcodeInput,
-      db.offers.adminPin || '2026'
-    );
+    // Path 2A: Initial Owner Setup (when no local credentials exist on this browser yet)
+    if (authDialogMode === 'setup') {
+      if (passcodeInput !== passcodeConfirmInput) {
+        setLoginError('Passcode and Confirm Passcode do not match.');
+        setLoginBusy(false);
+        return;
+      }
+      const initRes = await initializeOrUpdateLocalAdminCredentials(loginIdInput, passcodeInput);
+      if (!initRes.ok) {
+        setLoginError(initRes.error || 'Failed to initialize credentials.');
+        setLoginBusy(false);
+        return;
+      }
+      setIsLocalCredInitialized(true);
+      const session: AdminSession = {
+        loginId: loginIdInput.trim(),
+        mode: 'local_owner',
+        authenticatedAt: new Date().toLocaleTimeString('en-IN'),
+        expiresAt: Date.now() + 4 * 60 * 60 * 1000,
+      };
+      saveAdminSession(session);
+      setAdminSession(session);
+      setPasscodeInput('');
+      setPasscodeConfirmInput('');
+      setLoginBusy(false);
+      return;
+    }
+
+    // Path 2B: Owner Credential Recovery via GitHub Repository Ownership Verification
+    if (authDialogMode === 'recovery') {
+      if (passcodeInput !== passcodeConfirmInput) {
+        setLoginError('New Passcode and Confirm Passcode do not match.');
+        setLoginBusy(false);
+        return;
+      }
+      const ghVerify = await verifyGitHubRepoOwnershipForReset(recoveryRepoInput, recoveryPatInput);
+      if (!ghVerify.ok) {
+        setLoginError(ghVerify.error || 'GitHub repository ownership verification failed.');
+        setLoginBusy(false);
+        return;
+      }
+      const resetRes = await initializeOrUpdateLocalAdminCredentials(loginIdInput, passcodeInput);
+      if (!resetRes.ok) {
+        setLoginError(resetRes.error || 'Failed to save new credentials.');
+        setLoginBusy(false);
+        return;
+      }
+      setIsLocalCredInitialized(true);
+      setRecoveryPatInput('');
+      setPasscodeInput('');
+      setPasscodeConfirmInput('');
+      setAuthDialogMode('signin');
+      setLoginSuccessMsg('Repository ownership verified! Your new Admin credentials have been saved.');
+      setLoginBusy(false);
+      return;
+    }
+
+    // Path 2C: Standard Local Owner Sign-In (Salted SHA-256 verification)
+    const check = await verifyLocalAdminCredentials(loginIdInput, passcodeInput);
     setLoginBusy(false);
 
     if (!check.ok) {
-      setFailedAttempts((c) => c + 1);
       setLoginError(check.error || 'Authentication failed.');
       return;
     }
 
     const session: AdminSession = {
       loginId: loginIdInput.trim(),
-      mode: 'local_demo',
+      mode: 'local_owner',
       authenticatedAt: new Date().toLocaleTimeString('en-IN'),
       expiresAt: Date.now() + 4 * 60 * 60 * 1000,
     };
@@ -1021,7 +1080,7 @@ export const AdminControlCenter: React.FC<AdminControlCenterProps> = ({
   };
 
   // ============================================================================
-  // ZYVRA ADMIN LOGIN SCREEN (Login ID: Sajiya@8800)
+  // ZYVRA ADMIN AUTHENTICATION SCREEN (No Exposed Credentials)
   // ============================================================================
   if (!adminSession) {
     return (
@@ -1038,7 +1097,7 @@ export const AdminControlCenter: React.FC<AdminControlCenterProps> = ({
               type="button"
               onClick={onClose}
               className="rounded-lg p-1.5 text-slate-400 hover:text-white"
-              title="Close Admin Login"
+              title="Close Admin Dialog"
             >
               <X className="h-4 w-4" />
             </button>
@@ -1047,24 +1106,126 @@ export const AdminControlCenter: React.FC<AdminControlCenterProps> = ({
           <div className="mt-4">
             <span className="inline-flex items-center gap-1.5 text-xs font-bold uppercase tracking-wider text-indigo-400">
               <Shield className="h-3.5 w-3.5" />
-              Administrator Authentication
+              {apiBaseUrl
+                ? 'Server-Side Administrator Authentication'
+                : authDialogMode === 'setup'
+                ? 'Initial Owner Credential Setup'
+                : authDialogMode === 'recovery'
+                ? 'Owner Credential Reset (GitHub Verified)'
+                : 'Administrator Authentication'}
             </span>
-            <h2 className="mt-1 text-lg font-bold">Sign in to Zyvra Control Center</h2>
+            <h2 className="mt-1 text-lg font-bold">
+              {apiBaseUrl
+                ? 'Sign in to Zyvra Control Center'
+                : authDialogMode === 'setup'
+                ? 'Create Owner Admin Credentials'
+                : authDialogMode === 'recovery'
+                ? 'Reset Local Admin Credentials'
+                : 'Sign in to Zyvra Control Center'}
+            </h2>
             <p className="mt-1 text-xs text-slate-400">
-              Authorized Administrator Login ID (<code className="text-indigo-300">Sajiya@8800</code>) and Passcode required.
+              {apiBaseUrl
+                ? 'Enter your server-configured Administrator Login ID and Passcode.'
+                : authDialogMode === 'setup'
+                ? 'No local administrator credentials exist on this browser yet. Configure your private Admin Login ID and Passcode below (stored locally as salted SHA-256 hashes).'
+                : authDialogMode === 'recovery'
+                ? 'Verify write access to your GitHub repository using a Personal Access Token (PAT) to safely set a new Admin Login ID and Passcode without losing any student or exam data.'
+                : 'Enter your configured Administrator Login ID and Passcode.'}
             </p>
           </div>
 
+          {/* Mode Tabs for Static / Local Owner Deployment */}
+          {!apiBaseUrl && (
+            <div
+              className={`mt-4 grid grid-cols-2 gap-1.5 rounded-xl p-1 ${
+                isDark ? 'bg-white/[0.04]' : 'bg-slate-100'
+              }`}
+            >
+              <button
+                type="button"
+                onClick={() => {
+                  setLoginError('');
+                  setLoginSuccessMsg('');
+                  setAuthDialogMode(isLocalCredInitialized ? 'signin' : 'setup');
+                }}
+                className={`min-h-[36px] rounded-lg text-xs font-bold transition ${
+                  authDialogMode !== 'recovery'
+                    ? 'bg-indigo-600 text-white'
+                    : 'text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                {isLocalCredInitialized ? 'Admin Sign In' : 'First-Time Owner Setup'}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setLoginError('');
+                  setLoginSuccessMsg('');
+                  setAuthDialogMode('recovery');
+                }}
+                className={`min-h-[36px] rounded-lg text-xs font-bold transition ${
+                  authDialogMode === 'recovery'
+                    ? 'bg-indigo-600 text-white'
+                    : 'text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                Owner Credential Reset
+              </button>
+            </div>
+          )}
+
           <div className="mt-4 space-y-3.5">
+            {!apiBaseUrl && authDialogMode === 'recovery' && (
+              <>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-400">
+                    Connected GitHub Repository (owner/repo)
+                  </label>
+                  <input
+                    type="text"
+                    value={recoveryRepoInput}
+                    onChange={(e) => setRecoveryRepoInput(e.target.value)}
+                    placeholder="e.g. username/Zyvra-V1.0"
+                    required
+                    className={`mt-1 min-h-[42px] w-full rounded-xl border px-3.5 text-xs font-semibold outline-none ${
+                      isDark
+                        ? 'border-white/15 bg-white/5 text-white'
+                        : 'border-slate-300 bg-slate-50 text-slate-900'
+                    }`}
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-400">
+                    GitHub Personal Access Token (with repo write access)
+                  </label>
+                  <input
+                    type="password"
+                    value={recoveryPatInput}
+                    onChange={(e) => setRecoveryPatInput(e.target.value)}
+                    placeholder="ghp_... or github_pat_..."
+                    required
+                    className={`mt-1 min-h-[42px] w-full rounded-xl border px-3.5 font-mono text-xs outline-none ${
+                      isDark
+                        ? 'border-white/15 bg-white/5 text-white'
+                        : 'border-slate-300 bg-slate-50 text-slate-900'
+                    }`}
+                  />
+                </div>
+              </>
+            )}
+
             <div>
               <label className="block text-xs font-semibold text-slate-400">
-                Admin Login ID
+                {authDialogMode === 'setup' || authDialogMode === 'recovery'
+                  ? 'New Admin Login ID (min 4 chars)'
+                  : 'Admin Login ID'}
               </label>
               <input
                 type="text"
                 value={loginIdInput}
                 onChange={(e) => setLoginIdInput(e.target.value)}
-                placeholder="Sajiya@8800"
+                placeholder="Enter Admin Login ID"
+                autoComplete="off"
                 required
                 className={`mt-1 min-h-[44px] w-full rounded-xl border px-3.5 text-xs font-semibold outline-none ${
                   isDark
@@ -1076,14 +1237,16 @@ export const AdminControlCenter: React.FC<AdminControlCenterProps> = ({
 
             <div>
               <label className="block text-xs font-semibold text-slate-400">
-                Administrator Passcode
+                {authDialogMode === 'setup' || authDialogMode === 'recovery'
+                  ? 'New Administrator Passcode (min 6 chars)'
+                  : 'Administrator Passcode'}
               </label>
               <input
                 type="password"
                 value={passcodeInput}
                 onChange={(e) => setPasscodeInput(e.target.value)}
-                placeholder="Enter Admin Passcode"
-                autoFocus
+                placeholder="Enter Passcode"
+                autoComplete="new-password"
                 required
                 className={`mt-1 min-h-[44px] w-full rounded-xl border px-3.5 font-mono text-sm tracking-wider outline-none ${
                   isDark
@@ -1091,17 +1254,39 @@ export const AdminControlCenter: React.FC<AdminControlCenterProps> = ({
                     : 'border-slate-300 bg-slate-50 text-slate-900'
                 }`}
               />
-              {!apiBaseUrl && (
-                <p className="mt-1 text-[11px] text-slate-400">
-                  Local Demo Passcode defaults to your configured Admin PIN (initial default: 2026) and can be changed after signing in.
-                </p>
-              )}
             </div>
+
+            {!apiBaseUrl && (authDialogMode === 'setup' || authDialogMode === 'recovery') && (
+              <div>
+                <label className="block text-xs font-semibold text-slate-400">
+                  Confirm New Passcode
+                </label>
+                <input
+                  type="password"
+                  value={passcodeConfirmInput}
+                  onChange={(e) => setPasscodeConfirmInput(e.target.value)}
+                  placeholder="Re-enter Passcode"
+                  autoComplete="new-password"
+                  required
+                  className={`mt-1 min-h-[44px] w-full rounded-xl border px-3.5 font-mono text-sm tracking-wider outline-none ${
+                    isDark
+                      ? 'border-white/15 bg-white/5 text-white'
+                      : 'border-slate-300 bg-slate-50 text-slate-900'
+                  }`}
+                />
+              </div>
+            )}
           </div>
 
           {loginError && (
             <div className="mt-3 rounded-xl border border-rose-500/40 bg-rose-500/15 px-3 py-2 text-xs font-semibold text-rose-300">
               {loginError}
+            </div>
+          )}
+
+          {loginSuccessMsg && (
+            <div className="mt-3 rounded-xl border border-emerald-500/40 bg-emerald-500/15 px-3 py-2 text-xs font-semibold text-emerald-300">
+              {loginSuccessMsg}
             </div>
           )}
 
@@ -1113,10 +1298,10 @@ export const AdminControlCenter: React.FC<AdminControlCenterProps> = ({
                 : 'border-slate-200 bg-slate-50 text-slate-600'
             }`}
           >
-            <strong className="text-slate-300">Security & Deployment Note:</strong>{' '}
+            <strong className="text-slate-300">Security Architecture Note:</strong>{' '}
             {apiBaseUrl
-              ? `Connected to Backend Auth API (${apiBaseUrl}). Credentials are verified server-side.`
-              : 'Running in Static / Local Demo Mode. Frontend-only authentication protects local browser state for demonstration; for production multi-user security, configure VITE_API_BASE_URL or publish updates via GitHub Cloud Sync.'}
+              ? `Connected to Backend Auth Server (${apiBaseUrl}). Credentials are verified server-side using salted cryptographic hashing.`
+              : 'GitHub Pages hosts static frontend files only and cannot enforce a true server-side security boundary. In static mode, credentials are salted and SHA-256 hashed in your browser storage. For production server-enforced security, deploy the backend API (server.ts) and set VITE_API_BASE_URL.'}
           </div>
 
           <div className="mt-5 flex gap-2.5">
@@ -1134,7 +1319,15 @@ export const AdminControlCenter: React.FC<AdminControlCenterProps> = ({
               disabled={loginBusy}
               className="min-h-[44px] flex-1 rounded-xl bg-indigo-600 text-xs font-bold text-white hover:bg-indigo-500 disabled:opacity-50"
             >
-              {loginBusy ? 'Signing In...' : 'Sign In as Admin'}
+              {loginBusy
+                ? 'Processing...'
+                : apiBaseUrl
+                ? 'Sign In'
+                : authDialogMode === 'setup'
+                ? 'Initialize & Sign In'
+                : authDialogMode === 'recovery'
+                ? 'Verify & Reset Credentials'
+                : 'Sign In as Admin'}
             </button>
           </div>
         </form>
@@ -2802,25 +2995,36 @@ export const AdminControlCenter: React.FC<AdminControlCenterProps> = ({
                   </p>
                 </div>
 
-                {/* Admin Passcode Configuration */}
+                {/* Admin Credentials Configuration */}
                 <div
                   className={`rounded-2xl p-5 ${
                     isDark ? 'surface-card-dark' : 'surface-card-light'
                   }`}
                 >
                   <h3 className="text-sm font-bold">
-                    Admin Credentials (`{DEFAULT_ADMIN_LOGIN_ID}`)
+                    Update Local Owner Admin Credentials
                   </h3>
                   <p className="mt-1 text-xs text-slate-400">
-                    Update your local demonstration passcode hash for `{DEFAULT_ADMIN_LOGIN_ID}`. For production multi-user deployments, configure `VITE_API_BASE_URL` for server-side JWT authentication.
+                    Update your salted SHA-256 Admin Login ID and Passcode stored on this browser. For production multi-user security, deploy `server.ts` and configure `VITE_API_BASE_URL`.
                   </p>
-                  <div className="mt-3 flex flex-wrap gap-2 max-w-md">
+                  <div className="mt-3 grid grid-cols-1 gap-2.5 sm:grid-cols-3 max-w-2xl">
+                    <input
+                      type="text"
+                      value={newAdminLoginId}
+                      onChange={(e) => setNewAdminLoginId(e.target.value)}
+                      placeholder={`New Login ID (current: ${adminSession.loginId})`}
+                      className={`min-h-[42px] rounded-xl border px-3 text-xs outline-none ${
+                        isDark
+                          ? 'border-white/10 bg-white/5 text-white'
+                          : 'border-slate-200 bg-white text-slate-900'
+                      }`}
+                    />
                     <input
                       type="password"
                       value={newAdminPasscode}
                       onChange={(e) => setNewAdminPasscode(e.target.value)}
-                      placeholder="Enter New Passcode"
-                      className={`min-h-[42px] flex-1 rounded-xl border px-3 text-xs outline-none ${
+                      placeholder="New Passcode (min 6 chars)"
+                      className={`min-h-[42px] rounded-xl border px-3 text-xs outline-none ${
                         isDark
                           ? 'border-white/10 bg-white/5 text-white'
                           : 'border-slate-200 bg-white text-slate-900'
@@ -2828,18 +3032,23 @@ export const AdminControlCenter: React.FC<AdminControlCenterProps> = ({
                     />
                     <button
                       type="button"
-                      onClick={() => {
-                        if (!newAdminPasscode.trim() || newAdminPasscode.trim().length < 4) {
-                          notify('Passcode must be at least 4 characters.', false);
+                      onClick={async () => {
+                        const targetId = newAdminLoginId.trim() || adminSession.loginId;
+                        const res = await initializeOrUpdateLocalAdminCredentials(
+                          targetId,
+                          newAdminPasscode
+                        );
+                        if (!res.ok) {
+                          notify(res.error || 'Could not update credentials.', false);
                           return;
                         }
-                        setLocalAdminPasscode(newAdminPasscode);
+                        setNewAdminLoginId('');
                         setNewAdminPasscode('');
-                        notify('Updated local Admin Passcode hash.');
+                        notify('Updated salted SHA-256 Admin Login ID & Passcode.');
                       }}
                       className="min-h-[42px] rounded-xl bg-indigo-600 px-4 text-xs font-bold text-white hover:bg-indigo-500"
                     >
-                      Update Passcode
+                      Save Credentials
                     </button>
                   </div>
                 </div>

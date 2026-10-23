@@ -246,7 +246,7 @@ export interface OfferConfig {
   whatsappNumber: string;
   razorpayLink: string;
   countdownEndsAt: string;
-  adminPin: string;
+  adminPin?: string;
   applicableExamIds?: string[]; // Empty or 'ALL' means Universal Pass
   passScope?: 'universal' | 'exam_pack';
 }
