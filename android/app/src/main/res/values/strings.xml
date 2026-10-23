@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">zyvra</string>
+    <string name="title_activity_main">zyvra</string>
+    <string name="package_name">com.zyvra.app</string>
+    <string name="custom_url_scheme">com.zyvra.app</string>
+</resources>
