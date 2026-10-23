@@ -293,16 +293,59 @@ export const PDFReaderModal: React.FC<PDFReaderModalProps> = ({
               )}
             </div>
 
-            {searchQuery.trim() && (
-              <div className="mb-4 rounded-xl border border-indigo-500/30 bg-indigo-500/10 px-3.5 py-2 text-xs text-indigo-300">
-                Showing matches for <strong>"{searchQuery}"</strong>
-              </div>
-            )}
+            {searchQuery.trim() && (() => {
+              const q = searchQuery.trim().toLowerCase();
+              const hayEn =
+                readLang === 'en' || readLang === 'bilingual' ? activePage.en.toLowerCase() : '';
+              const hayHi =
+                readLang === 'hi' || readLang === 'bilingual' ? activePage.hi.toLowerCase() : '';
+              const countMatches = (str: string) => {
+                if (!str || !q) return 0;
+                let idx = 0;
+                let c = 0;
+                while ((idx = str.indexOf(q, idx)) !== -1) {
+                  c += 1;
+                  idx += q.length;
+                }
+                return c;
+              };
+              const totalMatches = countMatches(hayEn) + countMatches(hayHi);
+              return (
+                <div className="mb-4 flex items-center justify-between rounded-xl border border-indigo-500/30 bg-indigo-500/10 px-3.5 py-2 text-xs text-indigo-300">
+                  <span>
+                    Showing matches for <strong>"{searchQuery}"</strong>
+                  </span>
+                  <span className="font-bold tabular-nums">
+                    {totalMatches} {totalMatches === 1 ? 'match' : 'matches'} on this page
+                  </span>
+                </div>
+              );
+            })()}
 
             {/* English Section */}
             {(readLang === 'en' || readLang === 'bilingual') && (
               <div className={`reading-prose whitespace-pre-line ${fontSizeClass}`}>
-                {activePage.en}
+                {searchQuery.trim()
+                  ? activePage.en
+                      .split(
+                        new RegExp(
+                          `(${searchQuery.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})`,
+                          'gi'
+                        )
+                      )
+                      .map((part, idx) =>
+                        part.toLowerCase() === searchQuery.trim().toLowerCase() ? (
+                          <mark
+                            key={idx}
+                            className="rounded bg-amber-400/30 px-1 font-semibold text-amber-200"
+                          >
+                            {part}
+                          </mark>
+                        ) : (
+                          part
+                        )
+                      )
+                  : activePage.en}
               </div>
             )}
 
@@ -322,7 +365,27 @@ export const PDFReaderModal: React.FC<PDFReaderModalProps> = ({
                     : ''
                 }`}
               >
-                {activePage.hi}
+                {searchQuery.trim()
+                  ? activePage.hi
+                      .split(
+                        new RegExp(
+                          `(${searchQuery.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})`,
+                          'gi'
+                        )
+                      )
+                      .map((part, idx) =>
+                        part.toLowerCase() === searchQuery.trim().toLowerCase() ? (
+                          <mark
+                            key={idx}
+                            className="rounded bg-amber-400/30 px-1 font-semibold text-amber-200"
+                          >
+                            {part}
+                          </mark>
+                        ) : (
+                          part
+                        )
+                      )
+                  : activePage.hi}
               </div>
             )}
           </article>

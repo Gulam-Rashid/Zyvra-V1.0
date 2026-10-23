@@ -92,6 +92,26 @@ export const TestEngineModal: React.FC<TestEngineModalProps> = ({
     }
   }, [currentIndex, phase, currentQuestion]);
 
+  // Keyboard navigation support (ArrowLeft, ArrowRight, Escape)
+  useEffect(() => {
+    if (phase !== 'active') return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA')) return;
+      if (e.key === 'ArrowRight') {
+        setCurrentIndex((prev) => Math.min(questions.length - 1, prev + 1));
+      } else if (e.key === 'ArrowLeft') {
+        setCurrentIndex((prev) => Math.max(0, prev - 1));
+      } else if (e.key === 'Escape') {
+        if (showPaletteDrawer) setShowPaletteDrawer(false);
+        else if (showSubmitConfirm) setShowSubmitConfirm(false);
+        else if (showExitConfirm) setShowExitConfirm(false);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [phase, questions.length, showPaletteDrawer, showSubmitConfirm, showExitConfirm]);
+
   // Overall countdown + elapsed timer
   useEffect(() => {
     if (phase !== 'active') return;

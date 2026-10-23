@@ -75,6 +75,36 @@ function createSignedToken(loginId) {
   return `${payload}.${sig}`;
 }
 
+function verifySignedToken(token) {
+  if (!token || typeof token !== 'string' || !token.includes('.')) return null;
+  const [payload, sig] = token.split('.');
+  if (!payload || !sig) return null;
+  const expectedSig = crypto
+    .createHmac('sha256', ADMIN_SESSION_SECRET)
+    .update(payload)
+    .digest('base64url');
+  if (!constantTimeStringMatch(sig, expectedSig)) return null;
+  try {
+    const parsed = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
+    if (!parsed || parsed.role !== 'admin' || Date.now() > Number(parsed.exp)) {
+      return null;
+    }
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function extractTokenFromReq(req) {
+  const authHeader = (req.headers['authorization'] || '').toString();
+  if (authHeader.startsWith('Bearer ')) {
+    return authHeader.slice(7).trim();
+  }
+  const cookieHeader = (req.headers['cookie'] || '').toString();
+  const match = cookieHeader.match(/(?:^|;\s*)zyvra_admin_token=([^;]+)/);
+  return match ? match[1].trim() : '';
+}
+
 function sendJson(res, status, data, extraHeaders = {}) {
   res.writeHead(status, {
     'Content-Type': 'application/json; charset=utf-8',
@@ -90,6 +120,44 @@ function sendJson(res, status, data, extraHeaders = {}) {
 const server = http.createServer((req, res) => {
   if (req.method === 'OPTIONS') {
     sendJson(res, 204, {});
+    return;
+  }
+
+  if (req.method === 'GET' && req.url === '/api/health') {
+    sendJson(res, 200, {
+      ok: true,
+      service: 'zyvra-admin-auth',
+      configured: Boolean(ADMIN_LOGIN_ID && ADMIN_PASSWORD_HASH),
+    });
+    return;
+  }
+
+  if (req.method === 'GET' && req.url === '/api/admin/session') {
+    const token = extractTokenFromReq(req);
+    const verified = verifySignedToken(token);
+    if (!verified) {
+      sendJson(res, 401, { ok: false, error: 'Unauthorized or expired admin session.' });
+      return;
+    }
+    sendJson(res, 200, {
+      ok: true,
+      loginId: verified.sub,
+      role: verified.role,
+      expiresAt: verified.exp,
+    });
+    return;
+  }
+
+  if (req.method === 'POST' && req.url === '/api/admin/logout') {
+    sendJson(
+      res,
+      200,
+      { ok: true },
+      {
+        'Set-Cookie':
+          'zyvra_admin_token=; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=0',
+      }
+    );
     return;
   }
 

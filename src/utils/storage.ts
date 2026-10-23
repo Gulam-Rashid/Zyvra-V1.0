@@ -374,28 +374,31 @@ function normalizeSale(s: StudentSaleLog): StudentSaleLog {
 }
 
 /**
- * Non-destructive, idempotent migration from Schema v2.6 (SSC-only) to Schema v3.0 (Universal Multi-Exam)
+ * Non-destructive, idempotent migration from Schema v2.6 (SSC-only) to Schema v3.0 (Universal Multi-Exam).
+ * When `rawLegacyOrV3.schemaVersion === 3`, preserves exact Admin additions and deletions without
+ * re-inserting deleted seed records.
  */
 export function migrateDatabaseToV3(rawLegacyOrV3: Partial<MasterDatabase>): MasterDatabase {
   const seed = INITIAL_MASTER_DATABASE;
+  const isAlreadyV3 = rawLegacyOrV3?.schemaVersion === 3;
 
-  // 1. Merge Exam Families idempotently
-  const existingFamilies = Array.isArray(rawLegacyOrV3.examFamilies)
-    ? rawLegacyOrV3.examFamilies
-    : [];
+  // 1. Exam Families
   const familyMap = new Map<string, ExamFamily>();
-  (seed.examFamilies || []).forEach((f) => familyMap.set(f.id, normalizeFamily(f)));
-  existingFamilies.forEach((f) => {
+  if (!isAlreadyV3 || !Array.isArray(rawLegacyOrV3.examFamilies)) {
+    (seed.examFamilies || []).forEach((f) => familyMap.set(f.id, normalizeFamily(f)));
+  }
+  (rawLegacyOrV3.examFamilies || []).forEach((f) => {
     if (!f || !f.id) return;
     const prev = familyMap.get(f.id);
     familyMap.set(f.id, normalizeFamily({ ...(prev || {}), ...f }));
   });
 
-  // 2. Merge Exams idempotently
-  const existingExams = Array.isArray(rawLegacyOrV3.exams) ? rawLegacyOrV3.exams : [];
+  // 2. Exams
   const examMap = new Map<string, ExamCategory>();
-  (seed.exams || []).forEach((e) => examMap.set(safeLower(e.id || e.name), normalizeExam(e)));
-  existingExams.forEach((legacyExam) => {
+  if (!isAlreadyV3 || !Array.isArray(rawLegacyOrV3.exams)) {
+    (seed.exams || []).forEach((e) => examMap.set(safeLower(e.id || e.name), normalizeExam(e)));
+  }
+  (rawLegacyOrV3.exams || []).forEach((legacyExam) => {
     if (!legacyExam) return;
     const keyById = safeLower(legacyExam.id);
     const keyByName = safeLower(legacyExam.name);
@@ -432,33 +435,43 @@ export function migrateDatabaseToV3(rawLegacyOrV3: Partial<MasterDatabase>): Mas
     }
   });
 
-  // 3. Merge Questions without losing any Admin-added questions
-  const existingQuestions = Array.isArray(rawLegacyOrV3.questions) ? rawLegacyOrV3.questions : [];
+  // 3. Questions (Preserve Admin deletions when already on v3)
+  const seedQuestionLookup = new Map<string, Question>();
+  (seed.questions || []).forEach((q) => seedQuestionLookup.set(q.id, q));
+
   const questionMap = new Map<string, Question>();
-  (seed.questions || []).forEach((q) => questionMap.set(q.id, normalizeQuestion(q)));
-  existingQuestions.forEach((q) => {
+  if (!isAlreadyV3 || !Array.isArray(rawLegacyOrV3.questions)) {
+    (seed.questions || []).forEach((q) => questionMap.set(q.id, normalizeQuestion(q)));
+  }
+  (rawLegacyOrV3.questions || []).forEach((q) => {
     if (!q || !q.id) return;
-    const seedQ = questionMap.get(q.id);
+    const seedQ = seedQuestionLookup.get(q.id);
     questionMap.set(q.id, normalizeQuestion(q, seedQ));
   });
 
-  // 4. Merge Folders, Notes, Flashcards, Trends, TestSeries
+  // 4. Folders, Notes, Flashcards, Trends, TestSeries
   const folderMap = new Map<string, CustomFolder>();
-  (seed.folders || []).forEach((f) => folderMap.set(f.id, normalizeFolder(f)));
+  if (!isAlreadyV3 || !Array.isArray(rawLegacyOrV3.folders)) {
+    (seed.folders || []).forEach((f) => folderMap.set(f.id, normalizeFolder(f)));
+  }
   (rawLegacyOrV3.folders || []).forEach((f) => {
     if (!f || !f.id) return;
     folderMap.set(f.id, normalizeFolder({ ...(folderMap.get(f.id) || {}), ...f }));
   });
 
   const noteMap = new Map<string, StudyNote>();
-  (seed.notes || []).forEach((n) => noteMap.set(n.id, normalizeNote(n)));
+  if (!isAlreadyV3 || !Array.isArray(rawLegacyOrV3.notes)) {
+    (seed.notes || []).forEach((n) => noteMap.set(n.id, normalizeNote(n)));
+  }
   (rawLegacyOrV3.notes || []).forEach((n) => {
     if (!n || !n.id) return;
     noteMap.set(n.id, normalizeNote({ ...(noteMap.get(n.id) || {}), ...n }));
   });
 
   const flashcardMap = new Map<string, Flashcard>();
-  (seed.flashcards || []).forEach((fc) => flashcardMap.set(fc.id, normalizeFlashcard(fc)));
+  if (!isAlreadyV3 || !Array.isArray(rawLegacyOrV3.flashcards)) {
+    (seed.flashcards || []).forEach((fc) => flashcardMap.set(fc.id, normalizeFlashcard(fc)));
+  }
   (rawLegacyOrV3.flashcards || []).forEach((fc) => {
     if (!fc || !fc.id) return;
     flashcardMap.set(fc.id, normalizeFlashcard({ ...(flashcardMap.get(fc.id) || {}), ...fc }));
@@ -466,28 +479,31 @@ export function migrateDatabaseToV3(rawLegacyOrV3: Partial<MasterDatabase>): Mas
 
   const trendMap = new Map<string, PYQTrendTopic>();
   const seedTrends = seed.pyqTrends || seed.trends || [];
-  const rawTrends = rawLegacyOrV3.pyqTrends || rawLegacyOrV3.trends || [];
-  seedTrends.forEach((t) => {
-    if (t && t.id) trendMap.set(t.id, normalizeTrend(t));
-  });
-  rawTrends.forEach((t) => {
+  const rawTrends = rawLegacyOrV3.pyqTrends || rawLegacyOrV3.trends;
+  if (!isAlreadyV3 || !Array.isArray(rawTrends)) {
+    seedTrends.forEach((t) => {
+      if (t && t.id) trendMap.set(t.id, normalizeTrend(t));
+    });
+  }
+  (rawTrends || []).forEach((t) => {
     if (t && t.id) {
       trendMap.set(t.id, normalizeTrend({ ...(trendMap.get(t.id) || {}), ...t }));
     }
   });
 
   const testSeriesMap = new Map<string, TestSeriesPack>();
-  (seed.testSeries || []).forEach((ts) => testSeriesMap.set(ts.id, ts));
+  if (!isAlreadyV3 || !Array.isArray(rawLegacyOrV3.testSeries)) {
+    (seed.testSeries || []).forEach((ts) => testSeriesMap.set(ts.id, ts));
+  }
   (rawLegacyOrV3.testSeries || []).forEach((ts) => {
     if (ts && ts.id) testSeriesMap.set(ts.id, { ...(testSeriesMap.get(ts.id) || {}), ...ts });
   });
 
-  const rawSales =
-    Array.isArray(rawLegacyOrV3.salesLog) && rawLegacyOrV3.salesLog.length > 0
-      ? rawLegacyOrV3.salesLog
-      : Array.isArray(rawLegacyOrV3.salesLogs) && rawLegacyOrV3.salesLogs.length > 0
-      ? rawLegacyOrV3.salesLogs
-      : seed.salesLog || seed.salesLogs || [];
+  const rawSales = Array.isArray(rawLegacyOrV3.salesLog)
+    ? rawLegacyOrV3.salesLog
+    : Array.isArray(rawLegacyOrV3.salesLogs)
+    ? rawLegacyOrV3.salesLogs
+    : seed.salesLog || seed.salesLogs || [];
   const normalizedSales = rawSales.filter(Boolean).map(normalizeSale);
 
   const normalizedTrends = Array.from(trendMap.values());
@@ -502,10 +518,12 @@ export function migrateDatabaseToV3(rawLegacyOrV3: Partial<MasterDatabase>): Mas
     exams: Array.from(examMap.values()).sort(
       (a, b) => (a.sortOrder ?? a.order ?? 99) - (b.sortOrder ?? b.order ?? 99)
     ),
-    subjects: {
-      ...(seed.subjects || {}),
-      ...(rawLegacyOrV3.subjects || {}),
-    },
+    subjects: isAlreadyV3 && rawLegacyOrV3.subjects
+      ? { ...rawLegacyOrV3.subjects }
+      : {
+          ...(seed.subjects || {}),
+          ...(rawLegacyOrV3.subjects || {}),
+        },
     subtopicsMap: {
       ...(seed.subtopicsMap || {}),
       ...(rawLegacyOrV3.subtopicsMap || {}),
@@ -521,10 +539,9 @@ export function migrateDatabaseToV3(rawLegacyOrV3: Partial<MasterDatabase>): Mas
       ...seed.offers,
       ...(rawLegacyOrV3.offers || {}),
     },
-    coupons:
-      Array.isArray(rawLegacyOrV3.coupons) && rawLegacyOrV3.coupons.length > 0
-        ? rawLegacyOrV3.coupons
-        : seed.coupons,
+    coupons: Array.isArray(rawLegacyOrV3.coupons)
+      ? rawLegacyOrV3.coupons
+      : seed.coupons,
     salesLog: normalizedSales,
     salesLogs: normalizedSales,
     importHistory: Array.isArray(rawLegacyOrV3.importHistory)

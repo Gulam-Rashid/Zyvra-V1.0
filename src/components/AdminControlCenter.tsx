@@ -255,10 +255,14 @@ export const AdminControlCenter: React.FC<AdminControlCenterProps> = ({
   const [packNegMarks, setPackNegMarks] = useState('0.50');
   const [packShiftTag, setPackShiftTag] = useState('Official Paper Set');
   const [packIsPro, setPackIsPro] = useState(false);
+  const [packFolderId, setPackFolderId] = useState(
+    db.folders.find((f) => f.type === 'test')?.id || db.folders[0]?.id || 'folder-cgl-pyq'
+  );
 
   // ============================================================================
   // 6. NOTES & PDFS STATE
   // ============================================================================
+  const [editingNoteId, setEditingNoteId] = useState<string | null>(null);
   const [noteTitleEn, setNoteTitleEn] = useState('');
   const [noteTitleHi, setNoteTitleHi] = useState('');
   const [noteType, setNoteType] = useState<'text' | 'pdf'>('text');
@@ -949,7 +953,7 @@ export const AdminControlCenter: React.FC<AdminControlCenterProps> = ({
       title_hi: packTitleHi.trim() || packTitleEn.trim(),
       exam: packExam,
       category: 'pyq',
-      folderId: db.folders[0]?.id || 'folder-cgl-pyq',
+      folderId: packFolderId || db.folders[0]?.id || 'folder-cgl-pyq',
       subject: 'All Subjects',
       questionIds: qIds,
       durationMinutes: parseInt(packDuration, 10) || 30,
@@ -980,6 +984,22 @@ export const AdminControlCenter: React.FC<AdminControlCenterProps> = ({
     reader.readAsDataURL(file);
   };
 
+  const handleEditNote = (n: StudyNote) => {
+    setEditingNoteId(n.id);
+    setNoteTitleEn(n.title_en);
+    setNoteTitleHi(n.title_hi || n.title_en);
+    setNoteType(n.type);
+    setNoteExam(n.exam || db.exams[0]?.name || 'SSC CGL');
+    setNoteSubject(n.subject);
+    setNoteTopic(n.topic || 'Revision Sheet');
+    setNoteFolderId(n.folderId || db.folders[0]?.id || 'folder-notes');
+    setNoteContentEn(n.content_en);
+    setNoteContentHi(n.content_hi);
+    setNotePdfDataUrl(n.pdfUrl || '');
+    setNoteAllowDownload(Boolean(n.allowDownload));
+    setNoteIsPro(Boolean(n.isPro));
+  };
+
   const handleSaveNote = async () => {
     if (!noteTitleEn.trim()) {
       notify('Enter a note/PDF title first.', false);
@@ -991,7 +1011,7 @@ export const AdminControlCenter: React.FC<AdminControlCenterProps> = ({
       if (res.remoteUrl) finalPdfUrl = res.remoteUrl;
     }
     const newNote: StudyNote = {
-      id: `note-${Date.now()}`,
+      id: editingNoteId || `note-${Date.now()}`,
       title_en: noteTitleEn.trim(),
       title_hi: noteTitleHi.trim() || noteTitleEn.trim(),
       type: noteType,
@@ -1008,10 +1028,14 @@ export const AdminControlCenter: React.FC<AdminControlCenterProps> = ({
       isPro: noteIsPro,
       updatedAt: new Date().toISOString().slice(0, 10),
     };
+    const updatedNotes = editingNoteId
+      ? db.notes.map((n) => (n.id === editingNoteId ? newNote : n))
+      : [newNote, ...db.notes];
     onUpdateDatabase({
       ...db,
-      notes: [newNote, ...db.notes],
+      notes: updatedNotes,
     });
+    setEditingNoteId(null);
     setNoteTitleEn('');
     setNoteTitleHi('');
     setNoteContentEn('');
@@ -1397,14 +1421,15 @@ export const AdminControlCenter: React.FC<AdminControlCenterProps> = ({
               a.click();
               URL.revokeObjectURL(url);
             }}
-            className={`hidden min-h-[40px] items-center gap-1.5 rounded-xl border px-3 py-1.5 text-xs font-semibold sm:inline-flex ${
+            className={`inline-flex min-h-[40px] items-center gap-1.5 rounded-xl border px-2.5 py-1.5 text-xs font-semibold sm:px-3 ${
               isDark
                 ? 'border-white/10 bg-white/5 text-slate-200 hover:bg-white/10'
                 : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-100'
             }`}
+            title="Export Master Database JSON"
           >
             <Download className="h-3.5 w-3.5" />
-            Export DB
+            <span className="hidden sm:inline">Export DB</span>
           </button>
 
           <button
@@ -1444,11 +1469,18 @@ export const AdminControlCenter: React.FC<AdminControlCenterProps> = ({
       )}
 
       {/* Body Layout: Sidebar + Content */}
-      <div className="flex flex-1 overflow-hidden">
+      <div className="relative flex flex-1 overflow-hidden">
+        {/* Mobile Backdrop Overlay */}
+        {mobileMenuOpen && (
+          <div
+            onClick={() => setMobileMenuOpen(false)}
+            className="fixed inset-0 top-16 z-30 bg-black/60 backdrop-blur-xs lg:hidden"
+          />
+        )}
         {/* Desktop Sidebar & Mobile Drawer */}
         <aside
           className={`${
-            mobileMenuOpen ? 'fixed inset-y-16 left-0 z-40 block w-64' : 'hidden'
+            mobileMenuOpen ? 'fixed inset-y-16 left-0 z-40 block w-64 shadow-2xl' : 'hidden'
           } shrink-0 overflow-y-auto border-r p-3 lg:static lg:block lg:w-64 ${
             isDark
               ? 'border-white/10 bg-[#0D1322]'
@@ -2408,6 +2440,32 @@ export const AdminControlCenter: React.FC<AdminControlCenterProps> = ({
                           <option value="note">Study Notes Folder</option>
                         </select>
                       </div>
+                      <div className="grid grid-cols-2 gap-2">
+                        <select
+                          value={folderSubject}
+                          onChange={(e) => setFolderSubject(e.target.value)}
+                          className={`min-h-[42px] rounded-xl border px-3 text-xs outline-none ${
+                            isDark
+                              ? 'border-white/10 bg-[#0F172A] text-white'
+                              : 'border-slate-200 bg-white text-slate-900'
+                          }`}
+                        >
+                          <option value="All Subjects">All Subjects</option>
+                          {Object.keys(db.subjects || {}).map((s) => (
+                            <option key={s} value={s}>
+                              {s}
+                            </option>
+                          ))}
+                        </select>
+                        <label className="flex items-center gap-2 text-xs">
+                          <input
+                            type="checkbox"
+                            checked={folderIsPro}
+                            onChange={(e) => setFolderIsPro(e.target.checked)}
+                          />
+                          <span>Pro Locked Folder</span>
+                        </label>
+                      </div>
                       <button
                         type="button"
                         onClick={handleCreateFolder}
@@ -2430,7 +2488,18 @@ export const AdminControlCenter: React.FC<AdminControlCenterProps> = ({
                         type="text"
                         value={packTitleEn}
                         onChange={(e) => setPackTitleEn(e.target.value)}
-                        placeholder="Test Title (e.g. BPSC TRE Full Length Mock #1)"
+                        placeholder="Test Title (English — e.g. BPSC TRE Full Mock #1)"
+                        className={`min-h-[42px] w-full rounded-xl border px-3 text-xs outline-none ${
+                          isDark
+                            ? 'border-white/10 bg-white/5 text-white'
+                            : 'border-slate-200 bg-white text-slate-900'
+                        }`}
+                      />
+                      <input
+                        type="text"
+                        value={packTitleHi}
+                        onChange={(e) => setPackTitleHi(e.target.value)}
+                        placeholder="टेस्ट शीर्षक (हिन्दी)"
                         className={`min-h-[42px] w-full rounded-xl border px-3 text-xs outline-none ${
                           isDark
                             ? 'border-white/10 bg-white/5 text-white'
@@ -2453,17 +2522,82 @@ export const AdminControlCenter: React.FC<AdminControlCenterProps> = ({
                             </option>
                           ))}
                         </select>
+                        <select
+                          value={packFolderId}
+                          onChange={(e) => setPackFolderId(e.target.value)}
+                          className={`min-h-[42px] rounded-xl border px-3 text-xs outline-none ${
+                            isDark
+                              ? 'border-white/10 bg-[#0F172A] text-white'
+                              : 'border-slate-200 bg-white text-slate-900'
+                          }`}
+                        >
+                          {db.folders.map((f) => (
+                            <option key={f.id} value={f.id}>
+                              {f.name_en || f.name}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                      <div className="grid grid-cols-3 gap-2">
                         <input
                           type="number"
                           value={packDuration}
                           onChange={(e) => setPackDuration(e.target.value)}
-                          placeholder="Duration (Mins)"
+                          placeholder="Mins (30)"
+                          title="Duration in Minutes"
                           className={`min-h-[42px] rounded-xl border px-3 text-xs outline-none ${
                             isDark
                               ? 'border-white/10 bg-white/5 text-white'
                               : 'border-slate-200 bg-white text-slate-900'
                           }`}
                         />
+                        <input
+                          type="number"
+                          step="0.25"
+                          value={packMarksCorrect}
+                          onChange={(e) => setPackMarksCorrect(e.target.value)}
+                          placeholder="+Marks (2.0)"
+                          title="Marks per Correct Answer"
+                          className={`min-h-[42px] rounded-xl border px-3 text-xs outline-none ${
+                            isDark
+                              ? 'border-white/10 bg-white/5 text-white'
+                              : 'border-slate-200 bg-white text-slate-900'
+                          }`}
+                        />
+                        <input
+                          type="number"
+                          step="0.05"
+                          value={packNegMarks}
+                          onChange={(e) => setPackNegMarks(e.target.value)}
+                          placeholder="-Neg (0.50)"
+                          title="Negative Marking per Wrong Answer"
+                          className={`min-h-[42px] rounded-xl border px-3 text-xs outline-none ${
+                            isDark
+                              ? 'border-white/10 bg-white/5 text-white'
+                              : 'border-slate-200 bg-white text-slate-900'
+                          }`}
+                        />
+                      </div>
+                      <div className="grid grid-cols-2 gap-2">
+                        <input
+                          type="text"
+                          value={packShiftTag}
+                          onChange={(e) => setPackShiftTag(e.target.value)}
+                          placeholder="Shift Tag (Official Set)"
+                          className={`min-h-[42px] rounded-xl border px-3 text-xs outline-none ${
+                            isDark
+                              ? 'border-white/10 bg-white/5 text-white'
+                              : 'border-slate-200 bg-white text-slate-900'
+                          }`}
+                        />
+                        <label className="flex items-center gap-2 text-xs">
+                          <input
+                            type="checkbox"
+                            checked={packIsPro}
+                            onChange={(e) => setPackIsPro(e.target.checked)}
+                          />
+                          <span>Pro Pass Required</span>
+                        </label>
                       </div>
                       <button
                         type="button"
@@ -2472,6 +2606,100 @@ export const AdminControlCenter: React.FC<AdminControlCenterProps> = ({
                       >
                         Publish Test Pack
                       </button>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Existing Folders & Test Packs Management Lists */}
+                <div className="grid grid-cols-1 gap-5 md:grid-cols-2">
+                  <div
+                    className={`rounded-2xl p-5 ${
+                      isDark ? 'surface-card-dark' : 'surface-card-light'
+                    }`}
+                  >
+                    <h3 className="text-sm font-bold">Existing Folders ({db.folders.length})</h3>
+                    <div className="mt-3 divide-y divide-white/10">
+                      {db.folders.map((f) => (
+                        <div
+                          key={f.id}
+                          className="flex items-center justify-between gap-2 py-2.5 text-xs"
+                        >
+                          <div>
+                            <p className="font-bold">{f.name_en || f.name}</p>
+                            <p className="text-slate-400">
+                              {f.exam} · {f.type.toUpperCase()} · {f.subject}{' '}
+                              {f.isPro ? '· PRO' : '· FREE'}
+                            </p>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setConfirmDelete({
+                                label: `Folder "${f.name_en || f.name}"`,
+                                onConfirm: () => {
+                                  onUpdateDatabase({
+                                    ...db,
+                                    folders: db.folders.filter((item) => item.id !== f.id),
+                                  });
+                                  setConfirmDelete(null);
+                                  notify('Folder deleted.');
+                                },
+                              })
+                            }
+                            className="rounded-lg border border-rose-500/30 bg-rose-500/10 p-2 text-rose-400"
+                            title="Delete Folder"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div
+                    className={`rounded-2xl p-5 ${
+                      isDark ? 'surface-card-dark' : 'surface-card-light'
+                    }`}
+                  >
+                    <h3 className="text-sm font-bold">
+                      Published Test Series Packs ({db.testSeries.length})
+                    </h3>
+                    <div className="mt-3 divide-y divide-white/10">
+                      {db.testSeries.map((pack) => (
+                        <div
+                          key={pack.id}
+                          className="flex items-center justify-between gap-2 py-2.5 text-xs"
+                        >
+                          <div>
+                            <p className="font-bold">{pack.title_en}</p>
+                            <p className="text-slate-400">
+                              {pack.exam} · {pack.questionIds.length} Qs · {pack.durationMinutes}m ·
+                              +{pack.marksPerCorrect}/-{pack.negativeMarking}{' '}
+                              {pack.isPro ? '· PRO' : '· FREE'}
+                            </p>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setConfirmDelete({
+                                label: `Test Pack "${pack.title_en}"`,
+                                onConfirm: () => {
+                                  onUpdateDatabase({
+                                    ...db,
+                                    testSeries: db.testSeries.filter((item) => item.id !== pack.id),
+                                  });
+                                  setConfirmDelete(null);
+                                  notify('Test Series Pack deleted.');
+                                },
+                              })
+                            }
+                            className="rounded-lg border border-rose-500/30 bg-rose-500/10 p-2 text-rose-400"
+                            title="Delete Test Pack"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
+                      ))}
                     </div>
                   </div>
                 </div>
@@ -2495,7 +2723,26 @@ export const AdminControlCenter: React.FC<AdminControlCenterProps> = ({
                     isDark ? 'surface-card-dark' : 'surface-card-light'
                   }`}
                 >
-                  <h3 className="text-sm font-bold">Add Study Note / Upload PDF</h3>
+                  <div className="flex items-center justify-between">
+                    <h3 className="text-sm font-bold">
+                      {editingNoteId ? 'Edit Study Note / PDF' : 'Add Study Note / Upload PDF'}
+                    </h3>
+                    {editingNoteId && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setEditingNoteId(null);
+                          setNoteTitleEn('');
+                          setNoteTitleHi('');
+                          setNoteContentEn('');
+                          setNoteContentHi('');
+                        }}
+                        className="text-xs text-slate-400 hover:text-white"
+                      >
+                        Cancel Edit
+                      </button>
+                    )}
+                  </div>
                   <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-3">
                     <input
                       type="text"
@@ -2549,6 +2796,32 @@ export const AdminControlCenter: React.FC<AdminControlCenterProps> = ({
                         </option>
                       ))}
                     </select>
+                    <input
+                      type="text"
+                      value={noteTopic}
+                      onChange={(e) => setNoteTopic(e.target.value)}
+                      placeholder="Chapter / Topic (e.g. Constitutional Amendments)"
+                      className={`min-h-[42px] rounded-xl border px-3 text-xs outline-none ${
+                        isDark
+                          ? 'border-white/10 bg-white/5 text-white'
+                          : 'border-slate-200 bg-white text-slate-900'
+                      }`}
+                    />
+                    <select
+                      value={noteFolderId}
+                      onChange={(e) => setNoteFolderId(e.target.value)}
+                      className={`min-h-[42px] rounded-xl border px-3 text-xs outline-none ${
+                        isDark
+                          ? 'border-white/10 bg-[#0F172A] text-white'
+                          : 'border-slate-200 bg-white text-slate-900'
+                      }`}
+                    >
+                      {db.folders.map((f) => (
+                        <option key={f.id} value={f.id}>
+                          {f.name_en || f.name}
+                        </option>
+                      ))}
+                    </select>
                     <select
                       value={noteType}
                       onChange={(e) => setNoteType(e.target.value as 'text' | 'pdf')}
@@ -2568,6 +2841,14 @@ export const AdminControlCenter: React.FC<AdminControlCenterProps> = ({
                         onChange={(e) => setNoteAllowDownload(e.target.checked)}
                       />
                       <span>Allow Student PDF Download</span>
+                    </label>
+                    <label className="flex items-center gap-2 text-xs">
+                      <input
+                        type="checkbox"
+                        checked={noteIsPro}
+                        onChange={(e) => setNoteIsPro(e.target.checked)}
+                      />
+                      <span>Pro Pass Required</span>
                     </label>
                   </div>
 
@@ -2616,7 +2897,7 @@ export const AdminControlCenter: React.FC<AdminControlCenterProps> = ({
                       onClick={handleSaveNote}
                       className="min-h-[42px] rounded-xl bg-indigo-600 px-5 text-xs font-bold text-white hover:bg-indigo-500"
                     >
-                      Save Study Resource
+                      {editingNoteId ? 'Update Study Resource' : 'Save Study Resource'}
                     </button>
                   </div>
                 </div>
@@ -2637,29 +2918,42 @@ export const AdminControlCenter: React.FC<AdminControlCenterProps> = ({
                         <div>
                           <p className="font-bold">{n.title_en}</p>
                           <p className="text-slate-400">
-                            {n.exam || 'All Exams'} · {n.subject} · {n.type.toUpperCase()} ·{' '}
-                            {n.allowDownload ? 'Downloadable' : 'View-Only Locked'}
+                            {n.exam || 'All Exams'} · {n.subject} · {n.topic} ·{' '}
+                            {n.type.toUpperCase()} ·{' '}
+                            {n.allowDownload ? 'Downloadable' : 'View-Only Locked'}{' '}
+                            {n.isPro ? '· PRO' : '· FREE'}
                           </p>
                         </div>
-                        <button
-                          type="button"
-                          onClick={() =>
-                            setConfirmDelete({
-                              label: `Note "${n.title_en}"`,
-                              onConfirm: () => {
-                                onUpdateDatabase({
-                                  ...db,
-                                  notes: db.notes.filter((item) => item.id !== n.id),
-                                });
-                                setConfirmDelete(null);
-                                notify('Study note deleted.');
-                              },
-                            })
-                          }
-                          className="rounded-lg border border-rose-500/30 bg-rose-500/10 p-2 text-rose-400"
-                        >
-                          <Trash2 className="h-3.5 w-3.5" />
-                        </button>
+                        <div className="flex items-center gap-1.5">
+                          <button
+                            type="button"
+                            onClick={() => handleEditNote(n)}
+                            className="rounded-lg border border-white/10 bg-white/5 p-2 text-slate-300 hover:bg-white/10"
+                            title="Edit Note"
+                          >
+                            <Edit3 className="h-3.5 w-3.5" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setConfirmDelete({
+                                label: `Note "${n.title_en}"`,
+                                onConfirm: () => {
+                                  onUpdateDatabase({
+                                    ...db,
+                                    notes: db.notes.filter((item) => item.id !== n.id),
+                                  });
+                                  setConfirmDelete(null);
+                                  notify('Study note deleted.');
+                                },
+                              })
+                            }
+                            className="rounded-lg border border-rose-500/30 bg-rose-500/10 p-2 text-rose-400"
+                            title="Delete Note"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
                       </div>
                     ))}
                   </div>
@@ -3311,8 +3605,8 @@ export const AdminControlCenter: React.FC<AdminControlCenterProps> = ({
               />
             </div>
 
-            {/* Correct Answer & Tag */}
-            <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-3">
+            {/* Correct Answer, Tag, Difficulty, Stage, Folder, Source & Pro */}
+            <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-4">
               <div>
                 <label className="block text-xs text-slate-400">Correct Option</label>
                 <select
@@ -3355,9 +3649,63 @@ export const AdminControlCenter: React.FC<AdminControlCenterProps> = ({
                   <option value="Hard">Hard</option>
                 </select>
               </div>
+              <div>
+                <label className="block text-xs text-slate-400">Exam Stage</label>
+                <input
+                  type="text"
+                  value={qStage}
+                  onChange={(e) => setQStage(e.target.value)}
+                  placeholder="Tier 1 / Prelims"
+                  className={`mt-1 min-h-[40px] w-full rounded-xl border px-3 text-xs outline-none ${
+                    isDark ? 'border-white/10 bg-white/5' : 'border-slate-200 bg-white'
+                  }`}
+                />
+              </div>
+              <div>
+                <label className="block text-xs text-slate-400">Target Folder</label>
+                <select
+                  value={qFolderId}
+                  onChange={(e) => setQFolderId(e.target.value)}
+                  className={`mt-1 min-h-[40px] w-full rounded-xl border px-3 text-xs outline-none ${
+                    isDark ? 'border-white/10 bg-[#0F172A]' : 'border-slate-200 bg-white'
+                  }`}
+                >
+                  {db.folders.map((f) => (
+                    <option key={f.id} value={f.id}>
+                      {f.name_en || f.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="block text-xs text-slate-400">Source Classification</label>
+                <select
+                  value={qSourceClass}
+                  onChange={(e) =>
+                    setQSourceClass(e.target.value as QuestionSourceClassification)
+                  }
+                  className={`mt-1 min-h-[40px] w-full rounded-xl border px-3 text-xs outline-none ${
+                    isDark ? 'border-white/10 bg-[#0F172A]' : 'border-slate-200 bg-white'
+                  }`}
+                >
+                  <option value="verified_pyq">Verified PYQ</option>
+                  <option value="ai_guess_paper">Trending / High-Yield</option>
+                  <option value="custom_admin_set">Custom Admin</option>
+                </select>
+              </div>
+              <div className="flex items-end pb-2">
+                <label className="flex items-center gap-2 text-xs">
+                  <input
+                    type="checkbox"
+                    checked={qIsPro}
+                    onChange={(e) => setQIsPro(e.target.checked)}
+                  />
+                  <span>Pro Pass Locked Question</span>
+                </label>
+              </div>
             </div>
 
-            {/* Dual Explanations */}
+            {/* Dual Explanations (English & Hindi) */}
             <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
               <textarea
                 rows={2}
@@ -3373,6 +3721,24 @@ export const AdminControlCenter: React.FC<AdminControlCenterProps> = ({
                 value={qTrickEn}
                 onChange={(e) => setQTrickEn(e.target.value)}
                 placeholder="Method 2: 15-Second Exam Trick (English)"
+                className={`rounded-xl border p-2.5 text-xs outline-none ${
+                  isDark ? 'border-white/10 bg-white/5' : 'border-slate-200 bg-white'
+                }`}
+              />
+              <textarea
+                rows={2}
+                value={qBasicHi}
+                onChange={(e) => setQBasicHi(e.target.value)}
+                placeholder="विधि 1: मूल अवधारणा (हिन्दी)"
+                className={`rounded-xl border p-2.5 text-xs outline-none ${
+                  isDark ? 'border-white/10 bg-white/5' : 'border-slate-200 bg-white'
+                }`}
+              />
+              <textarea
+                rows={2}
+                value={qTrickHi}
+                onChange={(e) => setQTrickHi(e.target.value)}
+                placeholder="विधि 2: 15-सेकंड शॉर्ट ट्रिक (हिन्दी)"
                 className={`rounded-xl border p-2.5 text-xs outline-none ${
                   isDark ? 'border-white/10 bg-white/5' : 'border-slate-200 bg-white'
                 }`}
