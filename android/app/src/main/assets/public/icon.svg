@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" fill="none">
+  <defs>
+    <linearGradient id="zyvraBg" x1="0" y1="0" x2="512" y2="512" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#0B1120"/>
+      <stop offset="55%" stop-color="#1E1B4B"/>
+      <stop offset="100%" stop-color="#0F172A"/>
+    </linearGradient>
+    <linearGradient id="zyvraPrimary" x1="112" y1="112" x2="400" y2="400" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#6366F1"/>
+      <stop offset="55%" stop-color="#3B82F6"/>
+      <stop offset="100%" stop-color="#06B6D4"/>
+    </linearGradient>
+    <linearGradient id="zyvraCyan" x1="256" y1="112" x2="400" y2="256" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#38BDF8"/>
+      <stop offset="100%" stop-color="#06B6D4"/>
+    </linearGradient>
+  </defs>
+
+  <!-- App Icon Squircle Base -->
+  <rect width="512" height="512" rx="116" fill="url(#zyvraBg)"/>
+  <rect x="24" y="24" width="464" height="464" rx="96" stroke="rgba(255,255,255,0.10)" stroke-width="4"/>
+
+  <!-- Geometric Z + Ascending Knowledge Wing Symbol (Safe-Zone Centered) -->
+  <!-- Top Wing (Open Book / Horizon Bar of Z) -->
+  <path d="M144 148C144 136.954 152.954 128 164 128H356C369.538 128 377.49 143.226 369.462 154.132L218.5 352H348C359.046 352 368 360.954 368 372V380C368 391.046 359.046 400 348 400H156C142.462 400 134.51 384.774 142.538 373.868L293.5 176H164C152.954 176 144 167.046 144 156V148Z" fill="url(#zyvraPrimary)"/>
+
+  <!-- Subtle Progress Spark / Knowledge Node at Top-Right Apex -->
+  <circle cx="364" cy="244" r="22" fill="url(#zyvraCyan)"/>
+  <path d="M148 268L204 268" stroke="#38BDF8" stroke-width="14" stroke-linecap="round" opacity="0.85"/>
+</svg>
