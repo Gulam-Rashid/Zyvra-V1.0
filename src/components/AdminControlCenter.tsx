@@ -75,6 +75,7 @@ import {
 import {
   computeQuestionFingerprint,
   createSyncAuditEntry,
+  getAdminAuthHeaders,
   loadGitHubSyncConfig,
   pullDatabaseFromGitHub,
   pushDatabaseToGitHub,
@@ -1095,6 +1096,8 @@ export const AdminControlCenter: React.FC<AdminControlCenterProps> = ({
       isPro: packIsPro,
       categoryId: packCategoryId || undefined,
       subcategoryId: packSubcategoryId || undefined,
+      dynamicCategoryId: packCategoryId || undefined,
+      dynamicSubcategoryId: packSubcategoryId || undefined,
       customizationRules: {
         customizationAllowed: packCustomizationAllowed,
         allowModeSwitch: packCustomizationAllowed ? packAllowModeSwitch : false,
@@ -1131,25 +1134,38 @@ export const AdminControlCenter: React.FC<AdminControlCenterProps> = ({
       .replace(/^-|-$/g, '');
 
     if (editingCatId) {
-      const updated = list.map((c) =>
-        c.id === editingCatId
-          ? {
-              ...c,
-              name_en: catNameEn.trim(),
-              name_hi: catNameHi.trim() || catNameEn.trim(),
-              slug,
-              parentId: catParentId || null,
-              description: catDesc.trim() || undefined,
-              order: Number(catOrder) || 1,
-            }
-          : c
-      );
+      let editedNode: DynamicCategoryNode | null = null;
+      const updated = list.map((c) => {
+        if (c.id === editingCatId) {
+          editedNode = {
+            ...c,
+            name: catNameEn.trim(),
+            name_en: catNameEn.trim(),
+            name_hi: catNameHi.trim() || catNameEn.trim(),
+            slug,
+            parentId: catParentId || null,
+            description: catDesc.trim() || undefined,
+            order: Number(catOrder) || 1,
+          };
+          return editedNode;
+        }
+        return c;
+      });
       onUpdateDatabase({ ...db, dynamicCategories: updated });
+      if (editedNode) {
+        fetch('/api/admin/categories', {
+          method: 'POST',
+          headers: getAdminAuthHeaders(),
+          credentials: 'include',
+          body: JSON.stringify(editedNode),
+        }).catch(() => {});
+      }
       setEditingCatId(null);
       notify(`Updated category "${catNameEn.trim()}".`);
     } else {
       const node: DynamicCategoryNode = {
         id: `dcat-${Date.now()}`,
+        name: catNameEn.trim(),
         name_en: catNameEn.trim(),
         name_hi: catNameHi.trim() || catNameEn.trim(),
         slug,
@@ -1160,6 +1176,12 @@ export const AdminControlCenter: React.FC<AdminControlCenterProps> = ({
         createdAt: Date.now(),
       };
       onUpdateDatabase({ ...db, dynamicCategories: [...list, node] });
+      fetch('/api/admin/categories', {
+        method: 'POST',
+        headers: getAdminAuthHeaders(),
+        credentials: 'include',
+        body: JSON.stringify(node),
+      }).catch(() => {});
       notify(
         `Created ${catParentId ? 'Subcategory' : 'Main Category'} "${node.name_en}".`
       );
@@ -1189,7 +1211,8 @@ export const AdminControlCenter: React.FC<AdminControlCenterProps> = ({
         try {
           const res = await fetch('/api/admin/offers/upload-image', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: getAdminAuthHeaders(),
+            credentials: 'include',
             body: JSON.stringify({ dataUrl, fileName: file.name }),
           });
           if (!res.ok) {
@@ -1211,13 +1234,16 @@ export const AdminControlCenter: React.FC<AdminControlCenterProps> = ({
       notify('Enter an Offer Headline first.', false);
       return;
     }
+    const subtitleDefault =
+      promoSubtitleEn.trim() ||
+      'Unlock all verified PYQ papers, mock tests, and dual-method solutions.';
     const item: PromotionalOfferItem = {
       id: `promo-${Date.now()}`,
+      title: promoTitleEn.trim(),
       title_en: promoTitleEn.trim(),
       title_hi: promoTitleHi.trim() || promoTitleEn.trim(),
-      subtitle_en:
-        promoSubtitleEn.trim() ||
-        'Unlock all verified PYQ papers, mock tests, and dual-method solutions.',
+      subtitle: subtitleDefault,
+      subtitle_en: subtitleDefault,
       subtitle_hi:
         promoSubtitleEn.trim() ||
         'सभी परीक्षाओं के PYQ और मॉक टेस्ट अनलॉक करें।',
@@ -1227,15 +1253,24 @@ export const AdminControlCenter: React.FC<AdminControlCenterProps> = ({
       templateId: promoTemplateId,
       bannerImageUrl: promoBannerImageUrl || undefined,
       ctaText: promoCtaText.trim() || 'Unlock Now',
+      originalPrice: db.offers?.mrp || 999,
+      finalPrice: db.offers?.offerPrice || 149,
       validFrom: new Date().toISOString().slice(0, 10),
       validUntil: promoValidUntil || '2027-12-31',
       priority: (db.promotionalOffers || []).length + 1,
       active: true,
+      isActive: true,
     };
     onUpdateDatabase({
       ...db,
       promotionalOffers: [item, ...(db.promotionalOffers || [])],
     });
+    fetch('/api/admin/offers', {
+      method: 'POST',
+      headers: getAdminAuthHeaders(),
+      credentials: 'include',
+      body: JSON.stringify(item),
+    }).catch(() => {});
     setPromoTitleEn('');
     setPromoTitleHi('');
     setPromoSubtitleEn('');
@@ -4342,6 +4377,12 @@ export const AdminControlCenter: React.FC<AdminControlCenterProps> = ({
                                   : c
                               );
                               onUpdateDatabase({ ...db, referralCommissions: updated });
+                              fetch(`/api/admin/referrals/commissions/${rec.id}`, {
+                                method: 'PATCH',
+                                headers: getAdminAuthHeaders(),
+                                credentials: 'include',
+                                body: JSON.stringify({ status: nextStatus }),
+                              }).catch(() => {});
                               notify(`Commission ${rec.id} status updated to ${nextStatus}.`);
                             }}
                             className={`min-h-[36px] rounded-lg border px-2.5 text-xs font-bold ${
@@ -4542,6 +4583,7 @@ export const AdminControlCenter: React.FC<AdminControlCenterProps> = ({
                               onClick={() => {
                                 const msg = (ticketReplyInputs[tkt.id] || '').trim();
                                 if (!msg) return;
+                                const nowStr = new Date().toLocaleString('en-IN');
                                 const updated = (db.supportTickets || []).map((item) =>
                                   item.id === tkt.id
                                     ? {
@@ -4554,14 +4596,27 @@ export const AdminControlCenter: React.FC<AdminControlCenterProps> = ({
                                             id: `RPL-${Date.now()}`,
                                             authorRole: 'admin' as const,
                                             authorName: 'Zyvra Support Desk',
+                                            senderRole: 'admin' as const,
+                                            senderName: 'Zyvra Support Desk',
                                             message: msg,
                                             timestamp: Date.now(),
+                                            createdAt: nowStr,
                                           },
                                         ],
                                       }
                                     : item
                                 );
                                 onUpdateDatabase({ ...db, supportTickets: updated });
+                                fetch(`/api/admin/tickets/${tkt.id}/reply`, {
+                                  method: 'POST',
+                                  headers: getAdminAuthHeaders(),
+                                  credentials: 'include',
+                                  body: JSON.stringify({
+                                    message: msg,
+                                    status: 'resolved',
+                                    senderName: 'Zyvra Support Desk',
+                                  }),
+                                }).catch(() => {});
                                 setTicketReplyInputs({ ...ticketReplyInputs, [tkt.id]: '' });
                                 notify(`Reply sent for ticket ${tkt.id}.`);
                               }}
@@ -4584,15 +4639,15 @@ export const AdminControlCenter: React.FC<AdminControlCenterProps> = ({
                   }`}
                 >
                   <h3 className="text-sm font-bold">
-                    Student Test Feedback Inbox ({(db.feedbackList || []).length})
+                    Student Test Feedback Inbox ({(db.feedbackList || db.studentFeedback || []).length})
                   </h3>
-                  {(db.feedbackList || []).length === 0 ? (
+                  {(db.feedbackList || db.studentFeedback || []).length === 0 ? (
                     <p className="mt-3 text-xs text-slate-400">
                       No student test feedback entries submitted yet.
                     </p>
                   ) : (
                     <div className="mt-3 divide-y divide-white/10">
-                      {(db.feedbackList || []).map((fb: StudentFeedbackItem) => (
+                      {(db.feedbackList || db.studentFeedback || []).map((fb: StudentFeedbackItem) => (
                         <div
                           key={fb.id}
                           className="flex flex-wrap items-center justify-between gap-2 py-3 text-xs"
@@ -4604,7 +4659,7 @@ export const AdminControlCenter: React.FC<AdminControlCenterProps> = ({
                               </span>
                               <span className="font-semibold">{fb.studentName}</span>
                               <span className="text-slate-400">
-                                ({fb.packTitle || 'General App'} · {fb.category})
+                                ({fb.packTitle || fb.testTitle || 'General App'} · {fb.category})
                               </span>
                             </div>
                             <p className="mt-1 text-slate-300">{fb.message}</p>
@@ -4613,10 +4668,21 @@ export const AdminControlCenter: React.FC<AdminControlCenterProps> = ({
                             value={fb.status}
                             onChange={(e) => {
                               const nextSt = e.target.value as StudentFeedbackItem['status'];
-                              const updated = (db.feedbackList || []).map((item) =>
+                              const sourceList = db.feedbackList || db.studentFeedback || [];
+                              const updated = sourceList.map((item) =>
                                 item.id === fb.id ? { ...item, status: nextSt } : item
                               );
-                              onUpdateDatabase({ ...db, feedbackList: updated });
+                              onUpdateDatabase({
+                                ...db,
+                                feedbackList: updated,
+                                studentFeedback: updated,
+                              });
+                              fetch(`/api/admin/feedback/${fb.id}`, {
+                                method: 'PATCH',
+                                headers: getAdminAuthHeaders(),
+                                credentials: 'include',
+                                body: JSON.stringify({ status: nextSt }),
+                              }).catch(() => {});
                             }}
                             className={`rounded-lg border px-2.5 py-1 text-xs font-bold ${
                               isDark

@@ -276,8 +276,26 @@ export const TestEngineModal: React.FC<TestEngineModalProps> = ({
       list = list.slice(0, boundedCount);
     }
 
+    const effectiveMinutes = allowedCustomization && rules.allowTimerChange
+      ? Math.max(1, customOverallMinutes)
+      : (config.overallMinutes || 30);
+
+    if (config.packId) {
+      fetch('/api/tests/validate-attempt', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          packId: config.packId,
+          requestedMode: activeMode,
+          requestedTimerType: activeTimerType,
+          requestedDurationMinutes: effectiveMinutes,
+          requestedQuestionCount: list.length,
+        }),
+      }).catch(() => {});
+    }
+
     setFrozenQuestions(list);
-    setOverallSecondsLeft(Math.max(60, customOverallMinutes * 60));
+    setOverallSecondsLeft(Math.max(60, effectiveMinutes * 60));
     setVisitedQuestions(list[0] ? { [list[0].id]: true } : {});
     setCurrentIndex(0);
     setPhase('active');

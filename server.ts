@@ -170,18 +170,46 @@ function requireAdminAuth(req: Request, res: Response, next: NextFunction): void
   next();
 }
 
+function computeServerDeterministicHash(input: string): number {
+  let h1 = 0x811c9dc5;
+  let h2 = 5381;
+  for (let i = 0; i < input.length; i++) {
+    const ch = input.charCodeAt(i);
+    h1 ^= ch;
+    h1 = Math.imul(h1, 0x01000193);
+    h2 = (h2 * 33) ^ ch;
+  }
+  return Math.abs((h1 ^ h2) >>> 0);
+}
+
+function generateServerReferralCode(deviceId: string): string {
+  const clean = (deviceId || 'ZYV-1000-AAA').trim().toUpperCase();
+  const h = computeServerDeterministicHash(`ZYVRA_REF_2026::${clean}`);
+  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  const c1 = alphabet[h % alphabet.length];
+  const c2 = alphabet[(h >>> 5) % alphabet.length];
+  const c3 = alphabet[(h >>> 10) % alphabet.length];
+  const digits = String((h % 900) + 100);
+  return `ZYVREF-${digits}${c1}${c2}${c3}`;
+}
+
 function ensureMasterDbArrays(): Record<string, any> {
   if (!cloudStore.masterDb) {
     cloudStore.masterDb = {
-      version: 3,
+      version: '3.0.0-UNIVERSAL',
+      schemaVersion: 3,
       lastUpdated: Date.now(),
       feedbackList: [],
+      studentFeedback: [],
       supportTickets: [],
       referralAttributions: [],
       referralCommissions: [],
       promotionalOffers: [],
       dynamicCategories: [],
+      testSeries: [],
+      coupons: [],
       salesHistory: [],
+      salesLog: [],
       referralPolicy: {
         enabled: true,
         commissionType: 'percent',
@@ -195,7 +223,10 @@ function ensureMasterDbArrays(): Record<string, any> {
   }
   cloudStore.masterDb.feedbackList = Array.isArray(cloudStore.masterDb.feedbackList)
     ? cloudStore.masterDb.feedbackList
+    : Array.isArray(cloudStore.masterDb.studentFeedback)
+    ? [...cloudStore.masterDb.studentFeedback]
     : [];
+  cloudStore.masterDb.studentFeedback = cloudStore.masterDb.feedbackList;
   cloudStore.masterDb.supportTickets = Array.isArray(cloudStore.masterDb.supportTickets)
     ? cloudStore.masterDb.supportTickets
     : [];
@@ -214,6 +245,9 @@ function ensureMasterDbArrays(): Record<string, any> {
     : [];
   cloudStore.masterDb.dynamicCategories = Array.isArray(cloudStore.masterDb.dynamicCategories)
     ? cloudStore.masterDb.dynamicCategories
+    : [];
+  cloudStore.masterDb.testSeries = Array.isArray(cloudStore.masterDb.testSeries)
+    ? cloudStore.masterDb.testSeries
     : [];
   return cloudStore.masterDb;
 }
@@ -342,10 +376,10 @@ async function startServer() {
     const cleanId = String(loginId).trim();
     const cleanPass = String(password);
 
-    if (cleanId.length < 4 || cleanPass.length < 8) {
+    if (cleanId.length < 4 || cleanPass.length < 6) {
       res.status(400).json({
         ok: false,
-        error: 'Login ID must be at least 4 characters and Passcode at least 8 characters.',
+        error: 'Login ID must be at least 4 characters and Passcode at least 6 characters.',
       });
       return;
     }
@@ -393,7 +427,7 @@ async function startServer() {
 
     // If server has no admin credentials yet and client sends valid initial credentials (e.g. from mobile setup)
     if (!activeLoginId || !activePassHash) {
-      if (autoProvisionIfUnconfigured && cleanId.length >= 4 && cleanPass.length >= 8) {
+      if (autoProvisionIfUnconfigured && cleanId.length >= 4 && cleanPass.length >= 6) {
         cloudStore.adminConfig = {
           loginId: cleanId,
           passwordHash: createScryptHash(cleanPass),
@@ -549,16 +583,24 @@ async function startServer() {
     });
   });
 
-  app.put('/api/sync/master', (req: Request, res: Response) => {
+  app.put('/api/sync/master', requireAdminAuth, (req: Request, res: Response) => {
     const { masterDb } = req.body || {};
     if (!masterDb || typeof masterDb !== 'object') {
       res.status(400).json({ ok: false, error: 'Valid masterDb payload is required.' });
       return;
     }
 
+    const combinedFeedback = Array.isArray(masterDb.feedbackList) && masterDb.feedbackList.length > 0
+      ? masterDb.feedbackList
+      : Array.isArray(masterDb.studentFeedback) && masterDb.studentFeedback.length > 0
+      ? masterDb.studentFeedback
+      : cloudStore.masterDb?.feedbackList || [];
+
     cloudStore.masterDb = {
       ...cloudStore.masterDb,
       ...masterDb,
+      feedbackList: combinedFeedback,
+      studentFeedback: combinedFeedback,
       lastUpdated: Date.now(),
     };
     saveCloudStore();
@@ -583,10 +625,13 @@ async function startServer() {
     }
 
     const db = ensureMasterDbArrays();
+    const attemptKey = feedback.attemptId || feedback.testAttemptId;
     // Prevent duplicate feedback for the same test attempt
-    if (feedback.attemptId) {
+    if (attemptKey) {
       const duplicate = db.feedbackList.find(
-        (f: any) => f.deviceId === feedback.deviceId && f.attemptId === feedback.attemptId
+        (f: any) =>
+          f.deviceId === feedback.deviceId &&
+          (f.attemptId === attemptKey || f.testAttemptId === attemptKey)
       );
       if (duplicate) {
         res.json({ ok: true, item: duplicate, duplicate: true });
@@ -594,12 +639,17 @@ async function startServer() {
       }
     }
 
+    const packLabel = feedback.packTitle || feedback.testTitle;
     const item = {
       id: feedback.id || `FB-${Date.now()}`,
       deviceId: String(feedback.deviceId),
       studentName: String(feedback.studentName || 'Student Aspirant').slice(0, 80),
-      attemptId: feedback.attemptId ? String(feedback.attemptId) : undefined,
-      packTitle: feedback.packTitle ? String(feedback.packTitle) : undefined,
+      mobile: feedback.mobile ? String(feedback.mobile) : undefined,
+      attemptId: attemptKey ? String(attemptKey) : undefined,
+      testAttemptId: attemptKey ? String(attemptKey) : undefined,
+      packTitle: packLabel ? String(packLabel) : undefined,
+      testTitle: packLabel ? String(packLabel) : undefined,
+      exam: feedback.exam ? String(feedback.exam) : undefined,
       rating: ratingNum,
       category: feedback.category || 'overall_experience',
       message: String(feedback.message || '').trim().slice(0, 1500),
@@ -608,6 +658,7 @@ async function startServer() {
     };
 
     db.feedbackList.unshift(item);
+    db.studentFeedback = db.feedbackList;
     db.lastUpdated = Date.now();
     saveCloudStore();
     res.json({ ok: true, item });
@@ -629,6 +680,7 @@ async function startServer() {
     }
     if (status) target.status = status;
     if (adminNote !== undefined) target.adminNote = String(adminNote);
+    db.studentFeedback = db.feedbackList;
     db.lastUpdated = Date.now();
     saveCloudStore();
     res.json({ ok: true, item: target });
@@ -646,17 +698,20 @@ async function startServer() {
     }
 
     const db = ensureMasterDbArrays();
+    const generatedNum = ticket.ticketNumber || `TKT-${Math.floor(100000 + Math.random() * 900000)}`;
     const newTicket = {
-      id: ticket.id || `TKT-${Math.floor(100000 + Math.random() * 900000)}`,
+      id: ticket.id || generatedNum,
+      ticketNumber: generatedNum,
       deviceId: String(ticket.deviceId),
       studentName: String(ticket.studentName || 'Student').trim().slice(0, 80),
-      contactInfo: String(ticket.contactInfo || '').trim().slice(0, 120),
+      mobile: String(ticket.mobile || ticket.contactInfo || '').trim().slice(0, 40),
+      contactInfo: String(ticket.contactInfo || ticket.mobile || '').trim().slice(0, 120),
       category: ticket.category || 'technical_bug',
       subject: String(ticket.subject).trim().slice(0, 160),
       message: String(ticket.message).trim().slice(0, 2000),
       status: 'open',
       priority: ticket.priority || 'medium',
-      createdAt: ticket.createdAt || Date.now(),
+      createdAt: ticket.createdAt || new Date().toLocaleString('en-IN'),
       updatedAt: Date.now(),
       replies: Array.isArray(ticket.replies) ? ticket.replies : [],
     };
@@ -676,23 +731,27 @@ async function startServer() {
     res.json({ ok: true, tickets: list });
   });
 
-  app.post('/api/admin/tickets/:id/reply', (req: Request, res: Response) => {
+  app.post('/api/admin/tickets/:id/reply', requireAdminAuth, (req: Request, res: Response) => {
     const { id } = req.params;
     const { message, status, authorName = 'Zyvra Support Desk' } = req.body || {};
     const db = ensureMasterDbArrays();
-    const ticket = db.supportTickets.find((t: any) => t.id === id);
+    const ticket = db.supportTickets.find((t: any) => t.id === id || t.ticketNumber === id);
     if (!ticket) {
       res.status(404).json({ ok: false, error: 'Support ticket not found.' });
       return;
     }
     if (message && String(message).trim()) {
       ticket.replies = Array.isArray(ticket.replies) ? ticket.replies : [];
+      const nowFormatted = new Date().toLocaleString('en-IN');
       ticket.replies.push({
         id: `RPL-${Date.now()}`,
         authorRole: 'admin',
+        senderRole: 'admin',
         authorName,
+        senderName: authorName,
         message: String(message).trim(),
         timestamp: Date.now(),
+        createdAt: nowFormatted,
       });
     }
     if (status) {
@@ -847,8 +906,9 @@ async function startServer() {
     const body = req.body || {};
     const refereeDeviceId = body.refereeDeviceId || body.referredDeviceId || '';
     const refereeName = body.refereeName || body.referredStudentName || 'Student';
+    const refereeMobile = body.refereeMobile || body.referredMobile || '';
     const referralCode = body.referralCode || '';
-    const cleanReferee = String(refereeDeviceId || '').trim();
+    const cleanReferee = String(refereeDeviceId || '').trim().toUpperCase();
     const cleanCode = String(referralCode || '').trim().toUpperCase();
 
     if (!cleanReferee || !cleanCode) {
@@ -856,16 +916,10 @@ async function startServer() {
       return;
     }
 
-    // Derive expected self-code to block self-referral
-    const selfClean = cleanReferee.replace(/[^A-Z0-9]/gi, '').toUpperCase().slice(-6);
-    let selfHash = 0;
-    for (let i = 0; i < cleanReferee.length; i++) {
-      selfHash = (selfHash * 31 + cleanReferee.charCodeAt(i)) >>> 0;
-    }
-    const selfSuffix = (selfHash % 1296).toString(36).toUpperCase().padStart(2, '0');
-    const selfReferralCode = `ZYVREF-${selfClean}${selfSuffix}`;
+    // Derive expected self-code using the exact deterministic algorithm from cryptoLock.ts
+    const expectedSelfReferralCode = generateServerReferralCode(cleanReferee);
 
-    if (cleanCode === selfReferralCode) {
+    if (cleanCode === expectedSelfReferralCode) {
       res.status(400).json({
         ok: false,
         error: 'Self-referral is not permitted. Please use a referral code from another student.',
@@ -875,7 +929,7 @@ async function startServer() {
 
     const db = ensureMasterDbArrays();
     const existingAttr = db.referralAttributions.find(
-      (a: any) => a.refereeDeviceId === cleanReferee
+      (a: any) => String(a.refereeDeviceId || '').toUpperCase() === cleanReferee
     );
     if (existingAttr) {
       res.status(409).json({
@@ -894,7 +948,7 @@ async function startServer() {
       }
     }
 
-    if (referrerDeviceId === cleanReferee) {
+    if (referrerDeviceId.toUpperCase() === cleanReferee) {
       res.status(400).json({
         ok: false,
         error: 'Self-referral is blocked by anti-fraud rules.',
@@ -908,8 +962,10 @@ async function startServer() {
       referrerDeviceId,
       refereeDeviceId: cleanReferee,
       refereeName: String(refereeName).slice(0, 80),
-      status: 'registered',
+      refereeMobile: String(refereeMobile).slice(0, 20),
+      status: 'attributed',
       registeredAt: Date.now(),
+      createdAt: Date.now(),
     };
 
     db.referralAttributions.unshift(attribution);
@@ -920,13 +976,22 @@ async function startServer() {
   });
 
   app.post('/api/referrals/qualify', (req: Request, res: Response) => {
-    const {
-      refereeDeviceId,
-      refereeName = 'Student',
-      referralCode = '',
-      orderAmount = 199,
-      utrNumber = '',
-    } = req.body || {};
+    const body = req.body || {};
+    const refereeDeviceId = String(body.refereeDeviceId || body.referredDeviceId || '').trim().toUpperCase();
+    const refereeName = String(body.refereeName || body.referredStudentName || 'Student').slice(0, 80);
+    const refereeMobile = String(body.refereeMobile || body.referredMobile || '').slice(0, 20);
+    const referralCode = String(body.referralCode || body.referrerCode || '').trim().toUpperCase();
+    const rawAmount = body.orderAmount ?? body.purchaseAmount ?? 149;
+    const utrNumber = String(body.utrNumber || '').trim();
+    const paymentStatus = String(body.paymentStatus || 'verified').toLowerCase();
+
+    if (paymentStatus === 'cancelled' || paymentStatus === 'refunded' || paymentStatus === 'unverified') {
+      res.status(400).json({
+        ok: false,
+        error: `Cannot generate payable referral commission for ${paymentStatus} payment.`,
+      });
+      return;
+    }
 
     const db = ensureMasterDbArrays();
     const policy = db.referralPolicy || {
@@ -941,14 +1006,22 @@ async function startServer() {
       return;
     }
 
-    const cleanCode = String(referralCode || '').trim().toUpperCase();
-    const cleanUtr = String(utrNumber || '').trim();
+    if (!referralCode) {
+      res.status(400).json({ ok: false, error: 'referralCode is required.' });
+      return;
+    }
+
+    // Block self-referral at qualification stage too
+    if (refereeDeviceId && generateServerReferralCode(refereeDeviceId) === referralCode) {
+      res.status(400).json({ ok: false, error: 'Self-referral is blocked by anti-fraud rules.' });
+      return;
+    }
 
     // Anti-fraud: prevent duplicate commission for the same UTR or same referee
     const duplicate = db.referralCommissions.find(
       (c: any) =>
-        (cleanUtr && c.utrNumber === cleanUtr) ||
-        (refereeDeviceId && c.refereeDeviceId === refereeDeviceId)
+        (utrNumber && utrNumber !== 'DIRECT-KEY' && c.utrNumber === utrNumber) ||
+        (refereeDeviceId && String(c.refereeDeviceId || '').toUpperCase() === refereeDeviceId)
     );
     if (duplicate) {
       res.json({ ok: true, commission: duplicate, duplicate: true });
@@ -956,16 +1029,20 @@ async function startServer() {
     }
 
     // Server-side commission calculation (never trust client calculation)
-    const numericOrder = Math.max(0, Number(orderAmount) || 0);
+    const numericOrder = Math.max(0, Number(rawAmount) || 0);
     const calculatedCommission =
       policy.commissionType === 'fixed'
         ? Math.min(numericOrder, Number(policy.commissionValue) || 0)
         : Math.round((numericOrder * (Number(policy.commissionValue) || 0)) / 100);
 
-    let referrerDeviceId = `REFOWNER-${cleanCode}`;
+    let referrerDeviceId = `REFOWNER-${referralCode}`;
+    let referrerName = 'Referrer Student';
+    let referrerMobile = '';
     for (const [devId, st] of Object.entries(cloudStore.studentStates)) {
-      if (String(st?.referralCode || '').toUpperCase() === cleanCode) {
+      if (String(st?.referralCode || '').toUpperCase() === referralCode) {
         referrerDeviceId = devId;
+        referrerName = String(st?.studentName || 'Referrer Student');
+        referrerMobile = String(st?.mobileNumber || '');
         break;
       }
     }
@@ -973,20 +1050,30 @@ async function startServer() {
     const record = {
       id: `COM-${Date.now()}`,
       referrerDeviceId,
-      referrerCode: cleanCode,
-      refereeDeviceId: String(refereeDeviceId || 'UNKNOWN'),
-      refereeName: String(refereeName).slice(0, 80),
+      referrerCode: referralCode,
+      referralCode,
+      referrerName,
+      referrerMobile,
+      refereeDeviceId: refereeDeviceId || 'UNKNOWN',
+      referredDeviceId: refereeDeviceId || 'UNKNOWN',
+      refereeName,
+      referredStudentName: refereeName,
+      refereeMobile,
+      referredMobile: refereeMobile,
       orderAmount: numericOrder,
+      purchaseAmount: numericOrder,
+      commissionType: policy.commissionType,
+      commissionRate: Number(policy.commissionValue) || 0,
       commissionAmount: calculatedCommission,
       status: 'pending',
-      utrNumber: cleanUtr || undefined,
+      utrNumber: utrNumber || 'VERIFIED-PRO',
       createdAt: Date.now(),
       updatedAt: Date.now(),
     };
 
     db.referralCommissions.unshift(record);
     const attr = db.referralAttributions.find(
-      (a: any) => a.refereeDeviceId === refereeDeviceId
+      (a: any) => String(a.refereeDeviceId || '').toUpperCase() === refereeDeviceId
     );
     if (attr) {
       attr.status = 'qualified';
@@ -999,10 +1086,12 @@ async function startServer() {
   });
 
   app.post('/api/referrals/payout-request', (req: Request, res: Response) => {
-    const { referrerCode, payoutUpiId } = req.body || {};
-    const cleanCode = String(referrerCode || '').trim().toUpperCase();
-    const cleanUpi = String(payoutUpiId || '').trim();
-    if (!cleanCode || !cleanUpi) {
+    const body = req.body || {};
+    const cleanCode = String(body.referrerCode || body.referralCode || '').trim().toUpperCase();
+    const cleanUpi = String(body.payoutUpiId || body.upiId || '').trim();
+    const cleanDevice = String(body.referrerDeviceId || '').trim().toUpperCase();
+
+    if ((!cleanCode && !cleanDevice) || !cleanUpi) {
       res.status(400).json({ ok: false, error: 'Referral code and UPI ID are required.' });
       return;
     }
@@ -1010,7 +1099,9 @@ async function startServer() {
     const db = ensureMasterDbArrays();
     const eligible = db.referralCommissions.filter(
       (c: any) =>
-        c.referrerCode === cleanCode &&
+        (c.referrerCode === cleanCode ||
+          c.referralCode === cleanCode ||
+          (cleanDevice && String(c.referrerDeviceId || '').toUpperCase() === cleanDevice)) &&
         (c.status === 'approved' || c.status === 'pending')
     );
     const totalEligible = eligible.reduce(
@@ -1035,11 +1126,175 @@ async function startServer() {
     db.lastUpdated = Date.now();
     saveCloudStore();
 
-    res.json({ ok: true, updatedCount: eligible.length, totalPayable: totalEligible });
+    res.json({
+      ok: true,
+      updatedCount: eligible.length,
+      totalPayable: totalEligible,
+      totalRequested: totalEligible,
+    });
   });
 
-  // 7. Promotional Offer Image Validation Endpoint (Phase 11)
-  app.post('/api/admin/offers/upload-image', (req: Request, res: Response) => {
+  app.patch('/api/admin/referrals/commissions/:id', requireAdminAuth, (req: Request, res: Response) => {
+    const { id } = req.params;
+    const { status, payoutReference, adminNote } = req.body || {};
+    const db = ensureMasterDbArrays();
+    const target = db.referralCommissions.find((c: any) => c.id === id);
+    if (!target) {
+      res.status(404).json({ ok: false, error: 'Commission record not found.' });
+      return;
+    }
+    if (status) target.status = status;
+    if (payoutReference !== undefined) target.payoutReference = String(payoutReference);
+    if (adminNote !== undefined) target.adminNote = String(adminNote);
+    target.updatedAt = Date.now();
+    db.lastUpdated = Date.now();
+    saveCloudStore();
+    res.json({ ok: true, commission: target });
+  });
+
+  // 7. Server-Side Test Customization Validation Endpoint (Phase 8)
+  app.post('/api/tests/validate-attempt', (req: Request, res: Response) => {
+    const {
+      packId,
+      requestedMode,
+      requestedTimerType,
+      requestedDurationMinutes,
+      requestedQuestionCount,
+      requestedRandomize,
+    } = req.body || {};
+
+    const db = ensureMasterDbArrays();
+    const pack = (db.testSeries || []).find((p: any) => p.id === packId);
+    if (!pack) {
+      // Custom Test Builder or ad-hoc practice test (not bound to a fixed pack)
+      res.json({
+        ok: true,
+        customizationAllowed: true,
+        enforcedConfig: {
+          mode: requestedMode || 'exam_hall',
+          timerType: requestedTimerType || 'overall',
+          overallMinutes: Math.max(1, Number(requestedDurationMinutes) || 15),
+          questionCount: Math.max(1, Number(requestedQuestionCount) || 10),
+          randomizeQuestions: Boolean(requestedRandomize),
+        },
+      });
+      return;
+    }
+
+    const rules = pack.customizationRules || {
+      customizationAllowed: true,
+      allowModeSwitch: true,
+      allowTimerChange: true,
+      allowQuestionCountChange: false,
+      allowCategoryFilter: false,
+      randomizeQuestions: false,
+    };
+
+    const defaultCount = Array.isArray(pack.questionIds) ? pack.questionIds.length : 10;
+    const defaultDuration = Number(pack.durationMinutes) || 20;
+
+    if (!rules.customizationAllowed) {
+      const modeBypassAttempted = requestedMode && requestedMode !== 'exam_hall';
+      const timerBypassAttempted = requestedTimerType && requestedTimerType !== 'overall';
+      const durationBypassAttempted =
+        requestedDurationMinutes !== undefined &&
+        Number(requestedDurationMinutes) !== defaultDuration;
+      const countBypassAttempted =
+        requestedQuestionCount !== undefined && Number(requestedQuestionCount) !== defaultCount;
+
+      if (
+        modeBypassAttempted ||
+        timerBypassAttempted ||
+        durationBypassAttempted ||
+        countBypassAttempted
+      ) {
+        res.status(403).json({
+          ok: false,
+          error:
+            'This official test has fixed parameters locked by the Administrator. Custom mode, timer, or question count overrides are not permitted.',
+          enforcedConfig: {
+            mode: 'exam_hall',
+            timerType: 'overall',
+            overallMinutes: defaultDuration,
+            questionCount: defaultCount,
+            randomizeQuestions: Boolean(rules.randomizeQuestions),
+          },
+        });
+        return;
+      }
+    }
+
+    res.json({
+      ok: true,
+      customizationAllowed: Boolean(rules.customizationAllowed),
+      enforcedConfig: {
+        mode:
+          rules.customizationAllowed && rules.allowModeSwitch
+            ? requestedMode || 'exam_hall'
+            : 'exam_hall',
+        timerType:
+          rules.customizationAllowed && rules.allowTimerChange
+            ? requestedTimerType || 'overall'
+            : 'overall',
+        overallMinutes:
+          rules.customizationAllowed && rules.allowTimerChange
+            ? Math.max(1, Math.min(180, Number(requestedDurationMinutes) || defaultDuration))
+            : defaultDuration,
+        questionCount:
+          rules.customizationAllowed && rules.allowQuestionCountChange
+            ? Math.max(1, Math.min(defaultCount, Number(requestedQuestionCount) || defaultCount))
+            : defaultCount,
+        randomizeQuestions: rules.customizationAllowed
+          ? Boolean(requestedRandomize)
+          : Boolean(rules.randomizeQuestions),
+      },
+    });
+  });
+
+  // 8. Dynamic Categories & Subcategories Endpoints (Phase 10)
+  app.get('/api/categories', (_req: Request, res: Response) => {
+    const db = ensureMasterDbArrays();
+    res.json({ ok: true, categories: db.dynamicCategories });
+  });
+
+  app.post('/api/admin/categories', requireAdminAuth, (req: Request, res: Response) => {
+    const body = req.body || {};
+    const nameEn = String(body.name_en || '').trim();
+    if (!nameEn) {
+      res.status(400).json({ ok: false, error: 'Category name_en is required.' });
+      return;
+    }
+    const db = ensureMasterDbArrays();
+    const slug = nameEn
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-|-$/g, '');
+    const node = {
+      id: body.id || `dcat-${Date.now()}`,
+      name_en: nameEn,
+      name_hi: String(body.name_hi || nameEn).trim(),
+      slug,
+      parentId: body.parentId || null,
+      examId: body.examId || 'ALL',
+      subject: body.subject || undefined,
+      description: body.description ? String(body.description).trim() : undefined,
+      order: Number(body.order) || db.dynamicCategories.length + 1,
+      status: body.status || 'active',
+      createdAt: Date.now(),
+    };
+    const existingIdx = db.dynamicCategories.findIndex((c: any) => c.id === node.id);
+    if (existingIdx >= 0) {
+      db.dynamicCategories[existingIdx] = { ...db.dynamicCategories[existingIdx], ...node };
+    } else {
+      db.dynamicCategories.push(node);
+    }
+    db.lastUpdated = Date.now();
+    saveCloudStore();
+    res.json({ ok: true, category: node, categories: db.dynamicCategories });
+  });
+
+  // 9. Promotional Offer Image Validation & Offer Validation Endpoints (Phase 11)
+  app.post('/api/admin/offers/upload-image', requireAdminAuth, (req: Request, res: Response) => {
     const { dataUrl = '', fileName = '' } = req.body || {};
     const str = String(dataUrl);
     if (!str.startsWith('data:image/')) {
@@ -1065,6 +1320,106 @@ async function startServer() {
       fileName: String(fileName).slice(0, 100),
       byteLength,
     });
+  });
+
+  app.post('/api/admin/offers', requireAdminAuth, (req: Request, res: Response) => {
+    const body = req.body || {};
+    const titleEn = String(body.title_en || body.title || '').trim();
+    if (!titleEn) {
+      res.status(400).json({ ok: false, error: 'Offer title_en is required.' });
+      return;
+    }
+    const db = ensureMasterDbArrays();
+    const offer = {
+      id: body.id || `promo-${Date.now()}`,
+      title: titleEn,
+      title_en: titleEn,
+      title_hi: String(body.title_hi || titleEn).trim(),
+      subtitle: String(body.subtitle_en || body.subtitle || '').trim(),
+      subtitle_en: String(body.subtitle_en || body.subtitle || '').trim(),
+      subtitle_hi: String(body.subtitle_hi || body.subtitle_en || '').trim(),
+      badgeText: String(body.badgeText || 'LIMITED OFFER').trim(),
+      discountText: String(body.discountText || '70% OFF').trim(),
+      discountPercent: Number(body.discountPercent) || 70,
+      couponCode: body.couponCode ? String(body.couponCode).trim().toUpperCase() : undefined,
+      templateId: body.templateId || 'royal_indigo',
+      bannerImageUrl: body.bannerImageUrl || undefined,
+      ctaText: String(body.ctaText || 'Claim Offer').trim(),
+      originalPrice: Number(body.originalPrice) || Number(db.offers?.mrp) || 999,
+      finalPrice: Number(body.finalPrice) || Number(db.offers?.offerPrice) || 149,
+      validFrom: body.validFrom || new Date().toISOString().slice(0, 10),
+      validUntil: body.validUntil || '2027-12-31',
+      targetExam: body.targetExam || 'ALL',
+      active: body.active !== false && body.isActive !== false,
+      isActive: body.active !== false && body.isActive !== false,
+      createdAt: Date.now(),
+    };
+    db.promotionalOffers.unshift(offer);
+    db.lastUpdated = Date.now();
+    saveCloudStore();
+    res.json({ ok: true, offer });
+  });
+
+  app.post('/api/offers/validate', (req: Request, res: Response) => {
+    const { couponCode = '', offerId = '', basePrice = 149 } = req.body || {};
+    const db = ensureMasterDbArrays();
+    const today = new Date().toISOString().slice(0, 10);
+    const cleanCoupon = String(couponCode).trim().toUpperCase();
+
+    if (offerId) {
+      const offer = (db.promotionalOffers || []).find((o: any) => o.id === offerId);
+      if (!offer) {
+        res.status(404).json({ ok: false, error: 'Promotional offer not found.' });
+        return;
+      }
+      const isActive = offer.isActive ?? offer.active ?? true;
+      if (!isActive || (offer.validFrom && offer.validFrom > today) || (offer.validUntil && offer.validUntil < today)) {
+        res.status(400).json({ ok: false, error: 'This promotional offer is inactive or expired.' });
+        return;
+      }
+    }
+
+    if (cleanCoupon) {
+      const coupon = (db.coupons || []).find(
+        (c: any) => c.active && String(c.code || '').toUpperCase() === cleanCoupon
+      );
+      const promoMatch = (db.promotionalOffers || []).find(
+        (o: any) =>
+          (o.isActive ?? o.active ?? true) &&
+          String(o.couponCode || '').toUpperCase() === cleanCoupon &&
+          (!o.validUntil || o.validUntil >= today)
+      );
+
+      if (!coupon && !promoMatch) {
+        res.status(400).json({ ok: false, error: 'Invalid or expired coupon code.' });
+        return;
+      }
+
+      const numericBase = Math.max(1, Number(basePrice) || Number(db.offers?.offerPrice) || 149);
+      let discount = 0;
+      if (coupon) {
+        discount =
+          coupon.type === 'flat'
+            ? Number(coupon.value) || 0
+            : Math.round((numericBase * (Number(coupon.value) || 0)) / 100);
+      } else if (promoMatch) {
+        discount =
+          promoMatch.discountType === 'flat'
+            ? Number(promoMatch.discountValue) || 30
+            : Math.round((numericBase * (Number(promoMatch.discountPercent) || 20)) / 100);
+      }
+      const finalPayable = Math.max(1, numericBase - discount);
+      res.json({
+        ok: true,
+        couponCode: cleanCoupon,
+        basePrice: numericBase,
+        discount,
+        finalPayable,
+      });
+      return;
+    }
+
+    res.json({ ok: true, basePrice: Number(basePrice) || 149, discount: 0, finalPayable: Number(basePrice) || 149 });
   });
 
   // Vite middleware in development, static dist in production

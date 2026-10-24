@@ -4,8 +4,318 @@
     "passwordHash": "Rashid@9955",
     "updatedAt": 1792846218531
   },
-  "masterDb": null,
-  "studentStates": {},
+  "masterDb": {
+    "version": "3.0.0-UNIVERSAL",
+    "schemaVersion": 3,
+    "lastUpdated": 1792850194428,
+    "feedbackList": [
+      {
+        "id": "fb-e2e-1792850194389",
+        "deviceId": "ZYV-DEV-E2E1",
+        "studentName": "Aarav Sharma",
+        "packTitle": "SSC Tier-1 Mock",
+        "testTitle": "SSC Tier-1 Mock",
+        "rating": 5,
+        "category": "content_quality",
+        "message": "Dual-method solutions are super clear!",
+        "status": "reviewed",
+        "createdAt": 1792850194391,
+        "adminNote": "Verified by QA"
+      },
+      {
+        "id": "fb-e2e-1792850119121",
+        "deviceId": "ZYV-DEV-E2E1",
+        "studentName": "Aarav Sharma",
+        "packTitle": "SSC Tier-1 Mock",
+        "testTitle": "SSC Tier-1 Mock",
+        "rating": 5,
+        "category": "content_quality",
+        "message": "Dual-method solutions are super clear!",
+        "status": "reviewed",
+        "createdAt": 1792850119123,
+        "adminNote": "Verified by QA"
+      }
+    ],
+    "studentFeedback": [
+      {
+        "id": "fb-e2e-1792850194389",
+        "deviceId": "ZYV-DEV-E2E1",
+        "studentName": "Aarav Sharma",
+        "packTitle": "SSC Tier-1 Mock",
+        "testTitle": "SSC Tier-1 Mock",
+        "rating": 5,
+        "category": "content_quality",
+        "message": "Dual-method solutions are super clear!",
+        "status": "reviewed",
+        "createdAt": 1792850194391,
+        "adminNote": "Verified by QA"
+      },
+      {
+        "id": "fb-e2e-1792850119121",
+        "deviceId": "ZYV-DEV-E2E1",
+        "studentName": "Aarav Sharma",
+        "packTitle": "SSC Tier-1 Mock",
+        "testTitle": "SSC Tier-1 Mock",
+        "rating": 5,
+        "category": "content_quality",
+        "message": "Dual-method solutions are super clear!",
+        "status": "reviewed",
+        "createdAt": 1792850119123,
+        "adminNote": "Verified by QA"
+      }
+    ],
+    "supportTickets": [
+      {
+        "id": "tkt-e2e-1792850194396",
+        "ticketNumber": "TKT-402029",
+        "deviceId": "ZYV-DEV-E2E1",
+        "studentName": "Aarav Sharma",
+        "mobile": "9876543210",
+        "contactInfo": "9876543210",
+        "category": "technical",
+        "subject": "Need help with Pro activation",
+        "message": "How do I enter my activation key?",
+        "status": "resolved",
+        "priority": "medium",
+        "createdAt": "24/10/2026, 1:56:34 pm",
+        "updatedAt": 1792850194399,
+        "replies": [
+          {
+            "id": "RPL-1792850194399",
+            "authorRole": "admin",
+            "senderRole": "admin",
+            "authorName": "Zyvra Support Desk",
+            "senderName": "Zyvra Support Desk",
+            "message": "Open Profile -> Enter Pro Key to unlock immediately.",
+            "timestamp": 1792850194399,
+            "createdAt": "24/10/2026, 1:56:34 pm"
+          }
+        ]
+      },
+      {
+        "id": "tkt-e2e-1792850119130",
+        "ticketNumber": "TKT-168683",
+        "deviceId": "ZYV-DEV-E2E1",
+        "studentName": "Aarav Sharma",
+        "mobile": "9876543210",
+        "contactInfo": "9876543210",
+        "category": "technical",
+        "subject": "Need help with Pro activation",
+        "message": "How do I enter my activation key?",
+        "status": "resolved",
+        "priority": "medium",
+        "createdAt": "24/10/2026, 1:55:19 pm",
+        "updatedAt": 1792850119143,
+        "replies": [
+          {
+            "id": "RPL-1792850119143",
+            "authorRole": "admin",
+            "senderRole": "admin",
+            "authorName": "Zyvra Support Desk",
+            "senderName": "Zyvra Support Desk",
+            "message": "Open Profile -> Enter Pro Key to unlock immediately.",
+            "timestamp": 1792850119143,
+            "createdAt": "24/10/2026, 1:55:19 pm"
+          }
+        ]
+      }
+    ],
+    "referralAttributions": [
+      {
+        "id": "ATTR-1792850194406",
+        "referrerCode": "ZYVREF-888XYZ",
+        "referrerDeviceId": "REFOWNER-ZYVREF-888XYZ",
+        "refereeDeviceId": "ZYV-DEV-PRIYA99",
+        "refereeName": "Priya Verma",
+        "refereeMobile": "9123456780",
+        "status": "attributed",
+        "registeredAt": 1792850194406,
+        "createdAt": 1792850194406
+      },
+      {
+        "id": "ATTR-1792850119149",
+        "referrerCode": "ZYV-ELF1-DP8B",
+        "referrerDeviceId": "REFOWNER-ZYV-ELF1-DP8B",
+        "refereeDeviceId": "ZYV-DEV-SELF1",
+        "refereeName": "Self User",
+        "refereeMobile": "",
+        "status": "attributed",
+        "registeredAt": 1792850119149,
+        "createdAt": 1792850119149
+      }
+    ],
+    "referralCommissions": [
+      {
+        "id": "COM-1792850194413",
+        "referrerDeviceId": "REFOWNER-ZYVREF-888XYZ",
+        "referrerCode": "ZYVREF-888XYZ",
+        "referralCode": "ZYVREF-888XYZ",
+        "referrerName": "Referrer Student",
+        "referrerMobile": "",
+        "refereeDeviceId": "ZYV-DEV-QUAL-1792850194412",
+        "referredDeviceId": "ZYV-DEV-QUAL-1792850194412",
+        "refereeName": "Rohan Gupta",
+        "referredStudentName": "Rohan Gupta",
+        "refereeMobile": "",
+        "referredMobile": "",
+        "orderAmount": 1000,
+        "purchaseAmount": 1000,
+        "commissionType": "percent",
+        "commissionRate": 20,
+        "commissionAmount": 200,
+        "status": "paid",
+        "utrNumber": "VERIFIED-PRO",
+        "createdAt": 1792850194413,
+        "updatedAt": 1792850194419,
+        "payoutUpiId": "referrer@upi"
+      }
+    ],
+    "promotionalOffers": [
+      {
+        "id": "promo-e2e-1",
+        "title": "SSC Festival Scholarship Offer",
+        "title_en": "SSC Festival Scholarship Offer",
+        "title_hi": "एसएससी फेस्टिवल स्कॉलरशिप ऑफर",
+        "subtitle": "",
+        "subtitle_en": "",
+        "subtitle_hi": "",
+        "badgeText": "LIMITED OFFER",
+        "discountText": "70% OFF",
+        "discountPercent": 50,
+        "couponCode": "FEST50",
+        "templateId": "royal_indigo",
+        "bannerImageUrl": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
+        "ctaText": "Claim Offer",
+        "originalPrice": 999,
+        "finalPrice": 149,
+        "validFrom": "2025-01-01",
+        "validUntil": "2028-12-31",
+        "targetExam": "ALL",
+        "active": true,
+        "isActive": true,
+        "createdAt": 1792850194428
+      }
+    ],
+    "dynamicCategories": [
+      {
+        "id": "dcat-e2e-main",
+        "name_en": "SSC Tier-1 Quantitative Special",
+        "name_hi": "एसएससी टियर-1 क्वांट स्पेशल",
+        "slug": "ssc-tier-1-quantitative-special",
+        "parentId": null,
+        "examId": "ALL",
+        "order": 1,
+        "status": "active",
+        "createdAt": 1792850194365
+      },
+      {
+        "id": "dcat-e2e-sub",
+        "name_en": "Arithmetic Shift-1 Sets",
+        "name_hi": "अंकगणित शिफ्ट-1 सेट",
+        "slug": "arithmetic-shift-1-sets",
+        "parentId": "dcat-e2e-main",
+        "examId": "ALL",
+        "order": 2,
+        "status": "active",
+        "createdAt": 1792850194370
+      }
+    ],
+    "testSeries": [
+      {
+        "id": "pack-e2e-fixed",
+        "title_en": "SSC Official Fixed Mock",
+        "title_hi": "एसएससी फिक्स्ड मॉक",
+        "exam": "SSC CGL",
+        "category": "mock",
+        "folderId": "folder-cgl-mock",
+        "subject": "All Subjects",
+        "questionIds": [
+          "q1",
+          "q2",
+          "q3",
+          "q4",
+          "q5"
+        ],
+        "durationMinutes": 60,
+        "marksPerCorrect": 2,
+        "negativeMarking": 0.5,
+        "shiftTag": "Strict Exam",
+        "isPro": false,
+        "categoryId": "dcat-e2e-main",
+        "subcategoryId": "dcat-e2e-sub",
+        "customizationRules": {
+          "customizationAllowed": false,
+          "allowModeSwitch": false,
+          "allowTimerChange": false,
+          "allowQuestionCountChange": false,
+          "allowCategoryFilter": false,
+          "randomizeQuestions": false
+        }
+      },
+      {
+        "id": "pack-e2e-custom",
+        "title_en": "SSC Customizable Practice Pack",
+        "title_hi": "एसएससी फिक्स्ड मॉक",
+        "exam": "SSC CGL",
+        "category": "mock",
+        "folderId": "folder-cgl-mock",
+        "subject": "All Subjects",
+        "questionIds": [
+          "q1",
+          "q2",
+          "q3",
+          "q4",
+          "q5"
+        ],
+        "durationMinutes": 60,
+        "marksPerCorrect": 2,
+        "negativeMarking": 0.5,
+        "shiftTag": "Strict Exam",
+        "isPro": false,
+        "categoryId": "dcat-e2e-main",
+        "subcategoryId": "dcat-e2e-sub",
+        "customizationRules": {
+          "customizationAllowed": true,
+          "allowModeSwitch": true,
+          "allowTimerChange": true,
+          "allowQuestionCountChange": true,
+          "allowCategoryFilter": true,
+          "randomizeQuestions": true
+        }
+      }
+    ],
+    "coupons": [],
+    "salesHistory": [],
+    "salesLog": [],
+    "referralPolicy": {
+      "enabled": true,
+      "commissionType": "percent",
+      "commissionValue": 20,
+      "minPayoutThreshold": 100,
+      "qualifyingEvent": "pro_activation",
+      "termsSummary": "Earn 20% commission on every verified Pro Pass upgrade made using your referral code."
+    }
+  },
+  "studentStates": {
+    "ZYV-DEV-E2E1": {
+      "deviceId": "ZYV-DEV-E2E1",
+      "studentName": "Aarav Sharma",
+      "mobileNumber": "9876543210",
+      "testHistory": [
+        {
+          "attemptId": "att-e2e-1",
+          "title": "SSC Tier-1 Mock",
+          "score": 18,
+          "maxScore": 20
+        }
+      ],
+      "isProUnlocked": false,
+      "bookmarks": [],
+      "mistakeNotebookIds": [],
+      "lastSyncedAt": 1792850194387,
+      "syncStatus": "synced"
+    }
+  },
   "processedIdempotencyKeys": {},
   "translationCache": {
     "q-test-1::bn": {
@@ -19,6 +329,18 @@
       "explanation": "যোগফল ভাগ সংখ্যা = 55/10 = 5.5",
       "provider": "cloud_ai",
       "updatedAt": 1792846642982
+    },
+    "37361cc4570b3f5439638d4c2bcf854f::bn": {
+      "questionText": "40 মিটার এবং 2 কিলোমিটারের অনুপাত কত?",
+      "options": [
+        "1 : 50",
+        "2 : 35",
+        "1 : 25",
+        "4 : 75"
+      ],
+      "explanation": "2 km = 2000 m. অনুপাত = 40 / 2000 = 1 : 50।",
+      "provider": "cloud_ai",
+      "updatedAt": 1792850257421
     }
   }
 }

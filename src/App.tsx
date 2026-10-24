@@ -428,7 +428,8 @@ export function App() {
   const activePromotionalOffers = useMemo(() => {
     const today = new Date().toISOString().slice(0, 10);
     return (db.promotionalOffers || []).filter((off) => {
-      if (!off.isActive) return false;
+      const isOffActive = off.isActive ?? off.active ?? true;
+      if (!isOffActive) return false;
       if (off.validFrom && off.validFrom > today) return false;
       if (off.validUntil && off.validUntil < today) return false;
       if (
@@ -452,6 +453,8 @@ export function App() {
         seriesCategoryFilter === 'ALL' || pack.category === seriesCategoryFilter;
       const matchesDynCat =
         selectedDynamicCatId === 'ALL' ||
+        pack.categoryId === selectedDynamicCatId ||
+        pack.subcategoryId === selectedDynamicCatId ||
         pack.dynamicCategoryId === selectedDynamicCatId ||
         pack.dynamicSubcategoryId === selectedDynamicCatId;
       return matchesExam && matchesFolder && matchesCat && matchesDynCat;
@@ -713,9 +716,11 @@ export function App() {
       status: 'unread',
       createdAt: new Date().toLocaleString('en-IN'),
     };
+    const mergedFeedback = [newItem, ...(db.studentFeedback || db.feedbackList || [])];
     const nextDb: MasterDatabase = {
       ...db,
-      studentFeedback: [newItem, ...(db.studentFeedback || [])],
+      studentFeedback: mergedFeedback,
+      feedbackList: mergedFeedback,
     };
     setDb(nextDb);
     saveMasterDatabase(nextDb);
@@ -823,7 +828,8 @@ export function App() {
         setPayoutMsg(data.error || 'Minimum payout threshold not met yet.');
         return;
       }
-      setPayoutMsg(`Payout request submitted for ₹${data.totalRequested}!`);
+      const requestedVal = data.totalRequested ?? data.totalPayable ?? 0;
+      setPayoutMsg(`Payout request submitted for ₹${requestedVal}!`);
       triggerCloudSync();
     } catch {
       setPayoutMsg('Connect to internet to submit live payout request.');
@@ -1421,7 +1427,7 @@ export function App() {
                         <div className="space-y-1.5">
                           <div className="flex flex-wrap items-center gap-2">
                             <span className="rounded-md bg-white/15 px-2.5 py-0.5 text-[10px] font-extrabold uppercase tracking-wider text-amber-300">
-                              {promo.badgeText || `${promo.discountPercent}% OFF`}
+                              {promo.badgeText || promo.discountText || `${promo.discountPercent || 70}% OFF`}
                             </span>
                             {promo.couponCode && (
                               <span className="inline-flex items-center gap-1 rounded-md border border-white/20 bg-black/30 px-2 py-0.5 font-mono text-[11px] font-bold text-cyan-300">
@@ -1430,14 +1436,22 @@ export function App() {
                               </span>
                             )}
                           </div>
-                          <h3 className="text-base font-extrabold">{promo.title}</h3>
-                          <p className="text-xs text-slate-200">{promo.subtitle}</p>
+                          <h3 className="text-base font-extrabold">
+                            {language === 'hi'
+                              ? promo.title_hi || promo.title_en || promo.title
+                              : promo.title_en || promo.title}
+                          </h3>
+                          <p className="text-xs text-slate-200">
+                            {language === 'hi'
+                              ? promo.subtitle_hi || promo.subtitle_en || promo.subtitle
+                              : promo.subtitle_en || promo.subtitle}
+                          </p>
                           <div className="flex items-baseline gap-2 pt-1">
                             <span className="text-xl font-extrabold text-emerald-400">
-                              ₹{promo.finalPrice}
+                              ₹{promo.finalPrice ?? db.offers?.offerPrice ?? 149}
                             </span>
                             <span className="text-xs text-slate-400 line-through">
-                              ₹{promo.originalPrice}
+                              ₹{promo.originalPrice ?? db.offers?.mrp ?? 999}
                             </span>
                             <span className="text-[11px] text-slate-300">
                               Valid till {promo.validUntil}
@@ -1449,7 +1463,7 @@ export function App() {
                           {promo.bannerImageUrl && (
                             <img
                               src={promo.bannerImageUrl}
-                              alt={promo.title}
+                              alt={promo.title_en || promo.title || 'Promotional Offer'}
                               className="h-16 w-28 rounded-xl border border-white/15 object-cover"
                             />
                           )}
@@ -1875,7 +1889,10 @@ export function App() {
                              : 'bg-white text-slate-700 border border-slate-200'
                          }`}
                        >
-                         {cat.parentId ? `↳ ${cat.name}` : cat.name}
+                         {cat.parentId ? '↳ ' : ''}
+                         {language === 'hi'
+                           ? cat.name_hi || cat.name_en || cat.name
+                           : cat.name_en || cat.name}
                        </button>
                      ))}
                    </div>
@@ -3535,9 +3552,10 @@ export function App() {
                                     key={rep.id}
                                     className="rounded-lg bg-emerald-500/10 p-2 text-xs text-emerald-200"
                                   >
-                                    <strong>{rep.senderName}:</strong> {rep.message}{' '}
+                                    <strong>{rep.senderName || rep.authorName || 'Zyvra Support Desk'}:</strong>{' '}
+                                    {rep.message}{' '}
                                     <span className="text-[10px] text-slate-400">
-                                      ({rep.createdAt})
+                                      ({rep.createdAt || (rep.timestamp ? new Date(rep.timestamp).toLocaleString('en-IN') : '')})
                                     </span>
                                   </div>
                                 ))}

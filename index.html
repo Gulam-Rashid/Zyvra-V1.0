@@ -30,6 +30,64 @@
     />
   </head>
   <body class="bg-[#0A0E17] text-slate-100 antialiased selection:bg-indigo-500/30 selection:text-indigo-200">
+    <!-- Zyvra Smooth Launch Splash Screen (Non-blocking, Offline-Safe, Reduced-Motion Aware) -->
+    <div
+      id="zyvra-launch-splash"
+      role="status"
+      aria-label="Loading Zyvra Exam Preparation Platform"
+      style="position:fixed;inset:0;z-index:9999;display:flex;flex-direction:column;align-items:center;justify-content:center;background:#0A0E17;transition:opacity 0.35s ease-out;"
+    >
+      <div style="display:flex;align-items:center;justify-content:center;width:64px;height:64px;border-radius:18px;background:linear-gradient(135deg,#0F172A,#1E1B4B,#0F172A);box-shadow:0 12px 32px rgba(99,102,241,0.25);border:1px solid rgba(255,255,255,0.14);">
+        <svg viewBox="0 0 128 128" width="46" height="46" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+          <defs>
+            <linearGradient id="zyvraSplashGrad" x1="20" y1="20" x2="108" y2="108" gradientUnits="userSpaceOnUse">
+              <stop offset="0%" stop-color="#6366F1" />
+              <stop offset="55%" stop-color="#3B82F6" />
+              <stop offset="100%" stop-color="#06B6D4" />
+            </linearGradient>
+          </defs>
+          <path d="M28 32C28 28.6863 30.6863 26 34 26H94C98.2199 26 100.699 30.748 98.1946 34.1489L48.5 92H92C95.3137 92 98 94.6863 98 98V100C98 103.314 95.3137 106 92 106H32C27.7801 106 25.3012 101.252 27.8054 97.8511L77.5 40H34C30.6863 40 28 37.3137 28 34V32Z" fill="url(#zyvraSplashGrad)" />
+          <circle cx="94" cy="64" r="7.5" fill="#06B6D4" />
+          <path d="M30 64H48" stroke="#38BDF8" stroke-width="6" stroke-linecap="round" opacity="0.85" />
+        </svg>
+      </div>
+      <div style="margin-top:14px;display:flex;align-items:baseline;gap:4px;">
+        <span style="font-family:'Plus Jakarta Sans',sans-serif;font-size:24px;font-weight:800;letter-spacing:-0.02em;color:#F8FAFC;">Zyvra</span>
+        <span style="width:6px;height:6px;border-radius:9999px;background:#22D3EE;display:inline-block;"></span>
+      </div>
+      <p style="margin-top:4px;font-family:'Plus Jakarta Sans',sans-serif;font-size:11px;font-weight:600;letter-spacing:0.12em;text-transform:uppercase;color:#94A3B8;">
+        Universal Exam Prep Platform
+      </p>
+    </div>
+    <script>
+      (function () {
+        var splash = document.getElementById('zyvra-launch-splash');
+        if (!splash) return;
+        var reducedMotion =
+          window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+        var delay = reducedMotion ? 80 : 420;
+        function hideSplash() {
+          if (!splash) return;
+          if (reducedMotion) {
+            splash.remove();
+            return;
+          }
+          splash.style.opacity = '0';
+          splash.style.pointerEvents = 'none';
+          setTimeout(function () {
+            if (splash && splash.parentNode) splash.parentNode.removeChild(splash);
+          }, 360);
+        }
+        if (document.readyState === 'complete' || document.readyState === 'interactive') {
+          setTimeout(hideSplash, delay);
+        } else {
+          window.addEventListener('DOMContentLoaded', function () {
+            setTimeout(hideSplash, delay);
+          });
+          setTimeout(hideSplash, 1200);
+        }
+      })();
+    </script>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>

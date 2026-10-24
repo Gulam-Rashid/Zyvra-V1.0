@@ -700,13 +700,46 @@ export function migrateDatabaseToV3(rawLegacyOrV3: Partial<MasterDatabase>): Mas
       ...seed.offers,
       ...(rawLegacyOrV3.offers || {}),
     },
-    promotionalOffers: Array.isArray(rawLegacyOrV3.promotionalOffers)
+    promotionalOffers: (Array.isArray(rawLegacyOrV3.promotionalOffers)
       ? rawLegacyOrV3.promotionalOffers
-      : defaultPromotionalOffers,
+      : defaultPromotionalOffers
+    ).map((po) => {
+      const isAct = po.isActive ?? po.active ?? true;
+      const tEn = po.title_en || po.title || 'Special Exam Offer';
+      const tHi = po.title_hi || tEn;
+      const subEn = po.subtitle_en || po.description_en || po.subtitle || '';
+      const subHi = po.subtitle_hi || po.description_hi || subEn;
+      return {
+        ...po,
+        title: tEn,
+        title_en: tEn,
+        title_hi: tHi,
+        subtitle: subEn,
+        subtitle_en: subEn,
+        subtitle_hi: subHi,
+        description_en: po.description_en || subEn,
+        description_hi: po.description_hi || subHi,
+        originalPrice: po.originalPrice ?? seed.offers?.mrp ?? 999,
+        finalPrice: po.finalPrice ?? seed.offers?.offerPrice ?? 149,
+        active: isAct,
+        isActive: isAct,
+      };
+    }),
     coupons: Array.isArray(rawLegacyOrV3.coupons) ? rawLegacyOrV3.coupons : seed.coupons,
     salesLog: normalizedSales,
     salesLogs: normalizedSales,
-    feedbackList: Array.isArray(rawLegacyOrV3.feedbackList) ? rawLegacyOrV3.feedbackList : [],
+    feedbackList:
+      Array.isArray(rawLegacyOrV3.feedbackList) && rawLegacyOrV3.feedbackList.length > 0
+        ? rawLegacyOrV3.feedbackList
+        : Array.isArray(rawLegacyOrV3.studentFeedback)
+        ? rawLegacyOrV3.studentFeedback
+        : [],
+    studentFeedback:
+      Array.isArray(rawLegacyOrV3.feedbackList) && rawLegacyOrV3.feedbackList.length > 0
+        ? rawLegacyOrV3.feedbackList
+        : Array.isArray(rawLegacyOrV3.studentFeedback)
+        ? rawLegacyOrV3.studentFeedback
+        : [],
     supportTickets: Array.isArray(rawLegacyOrV3.supportTickets)
       ? rawLegacyOrV3.supportTickets
       : [],
