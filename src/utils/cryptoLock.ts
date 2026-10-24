@@ -1,8 +1,173 @@
 const MASTER_SECRET_SALT = 'SSC_PRO_TCS_MASTER_SALT_2026_V9';
 const DEVICE_TOKEN_STORAGE_KEY = 'ssc_prep_hardware_install_token_v1';
+const STUDENT_DEVICE_SECRET_STORAGE_KEY = 'zyvra_student_device_install_secret_v1';
 const ADMIN_SESSION_STORAGE_KEY = 'zyvra_admin_session_v1';
 const ADMIN_CRED_STORAGE_KEY = 'zyvra_admin_cred_v2';
 const ADMIN_LOCKOUT_STORAGE_KEY = 'zyvra_admin_lockout_v1';
+
+/**
+ * Normalizes and validates a student WhatsApp / mobile number into E.164 format (+91XXXXXXXXXX or +CC...)
+ * and extracts the 10-digit local mobile number.
+ */
+export function normalizeWhatsAppNumber(
+  rawInput: string,
+  defaultCountryCode: string = '91'
+): { valid: boolean; normalized: string; localMobile: string; error?: string } {
+  const trimmed = String(rawInput || '').trim();
+  if (!trimmed) {
+    return {
+      valid: false,
+      normalized: '',
+      localMobile: '',
+      error: 'WhatsApp number is required.',
+    };
+  }
+
+  // Reject inputs containing letters or invalid symbols (only +, digits, spaces, hyphens, parentheses allowed)
+  if (!/^\+?[\d\s\-()]+$/.test(trimmed)) {
+    return {
+      valid: false,
+      normalized: '',
+      localMobile: '',
+      error: 'WhatsApp number may only contain digits, spaces, hyphens, and an optional leading +.',
+    };
+  }
+
+  const hasLeadingPlus = trimmed.startsWith('+');
+  const digitsOnly = trimmed.replace(/\D/g, '');
+
+  if (digitsOnly.length < 10 || digitsOnly.length > 15) {
+    return {
+      valid: false,
+      normalized: '',
+      localMobile: '',
+      error: 'Enter a valid 10-digit mobile number or international WhatsApp number (10–15 digits).',
+    };
+  }
+
+  // Reject all-identical dummy digits like 0000000000 or 1111111111
+  if (/^(\d)\1{9,}$/.test(digitsOnly)) {
+    return {
+      valid: false,
+      normalized: '',
+      localMobile: '',
+      error: 'Invalid phone number: repeated dummy digits are not allowed.',
+    };
+  }
+
+  // Case 1: 10-digit number (standard Indian mobile 6-9XXXXXXXXX)
+  if (digitsOnly.length === 10) {
+    if (defaultCountryCode === '91' && !/^[6-9]\d{9}$/.test(digitsOnly)) {
+      return {
+        valid: false,
+        normalized: '',
+        localMobile: '',
+        error: 'Indian 10-digit WhatsApp numbers must start with 6, 7, 8, or 9.',
+      };
+    }
+    return {
+      valid: true,
+      normalized: `+${defaultCountryCode}${digitsOnly}`,
+      localMobile: digitsOnly,
+    };
+  }
+
+  // Case 2: 11 digits with leading 0 (e.g. 09876543210)
+  if (!hasLeadingPlus && digitsOnly.length === 11 && digitsOnly.startsWith('0')) {
+    const tenDigits = digitsOnly.slice(1);
+    if (!/^[6-9]\d{9}$/.test(tenDigits)) {
+      return {
+        valid: false,
+        normalized: '',
+        localMobile: '',
+        error: 'Indian 10-digit WhatsApp numbers must start with 6, 7, 8, or 9.',
+      };
+    }
+    return {
+      valid: true,
+      normalized: `+${defaultCountryCode}${tenDigits}`,
+      localMobile: tenDigits,
+    };
+  }
+
+  // Case 3: 12 digits starting with 91 (e.g. 919876543210 or +919876543210)
+  if (digitsOnly.length === 12 && digitsOnly.startsWith('91')) {
+    const tenDigits = digitsOnly.slice(2);
+    if (!/^[6-9]\d{9}$/.test(tenDigits)) {
+      return {
+        valid: false,
+        normalized: '',
+        localMobile: '',
+        error: 'Indian WhatsApp numbers (+91) must have a valid 10-digit subscriber number starting with 6–9.',
+      };
+    }
+    return {
+      valid: true,
+      normalized: `+91${tenDigits}`,
+      localMobile: tenDigits,
+    };
+  }
+
+  // Case 4: Valid international E.164 number (11-15 digits starting with country code 1-9)
+  if (/^[1-9]\d{10,14}$/.test(digitsOnly)) {
+    return {
+      valid: true,
+      normalized: `+${digitsOnly}`,
+      localMobile: digitsOnly.slice(-10),
+    };
+  }
+
+  return {
+    valid: false,
+    normalized: '',
+    localMobile: '',
+    error: 'Invalid WhatsApp phone number format.',
+  };
+}
+
+/**
+ * Retrieves or generates a persistent 256-bit (32-byte hex) device install secret
+ * used to cryptographically bind a student's deviceId to this device on the backend
+ * without requiring routine OTP login for students.
+ */
+export function getOrCreateStudentDeviceSecret(): string {
+  if (typeof window === 'undefined') return 'ssr-node-device-secret-0000000000000000';
+  try {
+    const existing = localStorage.getItem(STUDENT_DEVICE_SECRET_STORAGE_KEY);
+    if (existing && existing.length >= 32) {
+      return existing;
+    }
+    let secret = '';
+    if (window.crypto?.getRandomValues) {
+      const arr = new Uint8Array(32);
+      window.crypto.getRandomValues(arr);
+      secret = Array.from(arr, (b) => b.toString(16).padStart(2, '0')).join('');
+    } else {
+      secret = `${Date.now().toString(16)}-${Math.random().toString(16).slice(2)}-${Math.random()
+        .toString(16)
+        .slice(2)}`.padEnd(64, 'a');
+    }
+    localStorage.setItem(STUDENT_DEVICE_SECRET_STORAGE_KEY, secret);
+    return secret;
+  } catch {
+    return 'fallback-device-secret-zyvra-2026-student-bind';
+  }
+}
+
+/**
+ * Rotates the student device install secret and hardware token when logging out / switching students
+ * on a shared device so the next student gets a fresh unlinked device session.
+ */
+export function rotateStudentDeviceSecretForSharedLogout(): string {
+  if (typeof window === 'undefined') return '';
+  try {
+    localStorage.removeItem(STUDENT_DEVICE_SECRET_STORAGE_KEY);
+    localStorage.removeItem(DEVICE_TOKEN_STORAGE_KEY);
+  } catch {
+    // ignore
+  }
+  return getOrCreateStudentDeviceSecret();
+}
 
 /**
  * Generates or retrieves a persistent hardware signature component combined with

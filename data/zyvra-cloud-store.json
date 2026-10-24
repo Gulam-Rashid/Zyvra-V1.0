@@ -1,14 +1,35 @@
 {
   "adminConfig": {
     "loginId": "Sajiya@8800",
-    "passwordHash": "Rashid@9955",
-    "updatedAt": 1792846218531
+    "passwordHash": "16007fa998737559bc071140f3102572:eee95bd50495b18450cb591818245b006d8c2744a9c15c62f51b6560700d10dae81d6acf14d16c4baa9f6166a84082fa29719d306519737a95bad57527b0351c",
+    "updatedAt": 1792846218531,
+    "sessionVersion": 1
   },
+  "adminOtpChallenge": null,
+  "adminAuditLogs": [],
+  "studentDeviceBindings": {},
+  "activatedKeys": {},
   "masterDb": {
     "version": "3.0.0-UNIVERSAL",
     "schemaVersion": 3,
-    "lastUpdated": 1792850194428,
+    "lastUpdated": 1792852453154,
     "feedbackList": [
+      {
+        "id": "fb-1792852453573",
+        "deviceId": "ZYV-8280-79M",
+        "studentName": "SSC Aspirant",
+        "mobile": "9876543210",
+        "attemptId": "attempt-1792852407894",
+        "testAttemptId": "attempt-1792852407894",
+        "packTitle": "SSC CGL टियर-1 आधिकारिक PYQ मॉक (14 जुलाई शिफ्ट-1)",
+        "testTitle": "SSC CGL टियर-1 आधिकारिक PYQ मॉक (14 जुलाई शिफ्ट-1)",
+        "exam": "SSC CGL (Tier 1 & 2)",
+        "rating": 5,
+        "category": "test_quality",
+        "message": "Rated 5/5 stars for SSC CGL टियर-1 आधिकारिक PYQ मॉक (14 जुलाई शिफ्ट-1)",
+        "status": "new",
+        "createdAt": "24/10/2026, 8:04:13 pm"
+      },
       {
         "id": "fb-e2e-1792850194389",
         "deviceId": "ZYV-DEV-E2E1",
@@ -37,6 +58,22 @@
       }
     ],
     "studentFeedback": [
+      {
+        "id": "fb-1792852453573",
+        "deviceId": "ZYV-8280-79M",
+        "studentName": "SSC Aspirant",
+        "mobile": "9876543210",
+        "attemptId": "attempt-1792852407894",
+        "testAttemptId": "attempt-1792852407894",
+        "packTitle": "SSC CGL टियर-1 आधिकारिक PYQ मॉक (14 जुलाई शिफ्ट-1)",
+        "testTitle": "SSC CGL टियर-1 आधिकारिक PYQ मॉक (14 जुलाई शिफ्ट-1)",
+        "exam": "SSC CGL (Tier 1 & 2)",
+        "rating": 5,
+        "category": "test_quality",
+        "message": "Rated 5/5 stars for SSC CGL टियर-1 आधिकारिक PYQ मॉक (14 जुलाई शिफ्ट-1)",
+        "status": "new",
+        "createdAt": "24/10/2026, 8:04:13 pm"
+      },
       {
         "id": "fb-e2e-1792850194389",
         "deviceId": "ZYV-DEV-E2E1",

@@ -61,7 +61,13 @@ import {
   TestAttemptRecord,
   TestSeriesPack,
 } from './types/database';
-import { generateDeviceId, generateReferralCode } from './utils/cryptoLock';
+import {
+  generateDeviceId,
+  generateReferralCode,
+  getOrCreateStudentDeviceSecret,
+  normalizeWhatsAppNumber,
+  rotateStudentDeviceSecretForSharedLogout,
+} from './utils/cryptoLock';
 import {
   enqueueOfflineSyncItem,
   examStringsMatch,
@@ -854,27 +860,85 @@ export function App() {
     persistAndQueueStudentState(updated);
   };
 
-  const handleUpdateStudentIdentity = (name: string, mobile: string) => {
-    const newDevice = generateDeviceId(mobile);
+  const handleUpdateStudentIdentity = (
+    name: string,
+    mobile: string,
+    normalizedWhatsApp?: string
+  ) => {
+    const waCheck = normalizeWhatsAppNumber(normalizedWhatsApp || mobile);
+    const local10 = waCheck.valid ? waCheck.localMobile : mobile.replace(/\D/g, '').slice(-10);
+    const formattedWa = waCheck.valid ? waCheck.normalized : `+91${local10}`;
+    const newDevice = generateDeviceId(local10);
     const newRefCode = generateReferralCode(newDevice);
     const updated: StudentLocalState = {
       ...studentState,
       studentName: name,
-      mobileNumber: mobile,
+      mobileNumber: local10,
+      whatsappNumber: formattedWa,
+      whatsappVerified: false,
       deviceId: newDevice,
       referralCode: newRefCode,
     };
     persistAndQueueStudentState(updated);
   };
 
+  const handleResetSharedDeviceSession = async () => {
+    try {
+      await fetch('/api/student/session/logout', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Zyvra-Device-Secret': getOrCreateStudentDeviceSecret(),
+        },
+        body: JSON.stringify({ deviceId: studentState.deviceId }),
+      });
+    } catch {
+      // Offline fallback
+    }
+    rotateStudentDeviceSecretForSharedLogout();
+    const freshMobile = '9876543210';
+    const freshDevice = generateDeviceId(`${freshMobile}-${Date.now().toString().slice(-3)}`);
+    const freshState: StudentLocalState = {
+      studentName: 'New Student',
+      mobileNumber: freshMobile,
+      whatsappNumber: `+91${freshMobile}`,
+      whatsappVerified: false,
+      deviceId: freshDevice,
+      activeExamId: studentState.activeExamId,
+      isProUnlocked: false,
+      activatedProKey: '',
+      activatedAt: null,
+      bookmarkedQuestionIds: [],
+      bookmarkedNoteIds: [],
+      masteredFlashcardIds: [],
+      mistakes: {},
+      testHistory: [],
+      referralCode: generateReferralCode(freshDevice),
+    };
+    saveStudentState(freshState);
+    setStudentState(freshState);
+  };
+
   const handleProUnlockSuccess = (
     proKey: string,
     couponCode = 'NONE',
     amountPaid = 149,
-    utrNumber = 'DIRECT-KEY'
+    utrNumber = 'DIRECT-KEY',
+    normalizedWhatsApp?: string
   ) => {
+    const waCheck = normalizeWhatsAppNumber(
+      normalizedWhatsApp || studentState.whatsappNumber || studentState.mobileNumber
+    );
+    const finalWa = waCheck.valid
+      ? waCheck.normalized
+      : studentState.whatsappNumber || `+91${studentState.mobileNumber}`;
+    const finalMobile = waCheck.valid ? waCheck.localMobile : studentState.mobileNumber;
+
     const updatedStudent: StudentLocalState = {
       ...studentState,
+      mobileNumber: finalMobile,
+      whatsappNumber: finalWa,
+      whatsappVerified: false,
       isProUnlocked: true,
       activatedProKey: proKey,
       activatedAt: new Date().toLocaleString('en-IN'),
@@ -884,7 +948,9 @@ export function App() {
     const newSale: StudentSaleLog = {
       id: `sale-${Date.now()}`,
       studentName: studentState.studentName,
-      mobile: studentState.mobileNumber,
+      mobile: finalMobile,
+      whatsappNumber: finalWa,
+      whatsappVerified: false,
       deviceId: studentState.deviceId,
       utrNumber,
       amountPaid,
@@ -907,7 +973,7 @@ export function App() {
         body: JSON.stringify({
           referralCode: studentState.referredByCode,
           referredStudentName: studentState.studentName,
-          referredMobile: studentState.mobileNumber,
+          referredMobile: finalMobile,
           referredDeviceId: studentState.deviceId,
           purchaseAmount: amountPaid,
           utrNumber,
@@ -3029,11 +3095,11 @@ export function App() {
                   </div>
                   <div>
                     <span className="text-xs font-bold uppercase tracking-wider text-indigo-400">
-                      Zyvra Student Account & Device ID
+                      Zyvra Student Account & Device ID (Frictionless Device Login)
                     </span>
                     <h1 className="mt-1 text-xl font-bold">{studentState.studentName}</h1>
                     <p className="text-xs text-slate-400 tabular-nums">
-                      Registered Mobile: +91 {studentState.mobileNumber}
+                      WhatsApp / Mobile: {studentState.whatsappNumber || `+91${studentState.mobileNumber}`}
                     </p>
                   </div>
                 </div>
@@ -3058,6 +3124,15 @@ export function App() {
                   >
                     <Copy className="h-3.5 w-3.5" />
                     {copiedDeviceToast ? 'Copied' : 'Copy ID'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleResetSharedDeviceSession}
+                    title="Clear local session on a shared device so another student can use Zyvra safely"
+                    className="inline-flex min-h-[42px] items-center gap-1.5 rounded-xl border border-white/15 bg-white/[0.04] px-3 text-xs font-semibold text-slate-300 hover:bg-white/10"
+                  >
+                    <RotateCcw className="h-3.5 w-3.5" />
+                    Switch Student
                   </button>
                 </div>
               </div>

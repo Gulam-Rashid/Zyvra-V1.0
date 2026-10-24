@@ -11,7 +11,12 @@ import {
   X,
 } from 'lucide-react';
 import { CouponCode, LanguageMode, OfferConfig, StudentLocalState } from '../types/database';
-import { verifyProKeyForDevice } from '../utils/cryptoLock';
+import {
+  getOrCreateStudentDeviceSecret,
+  normalizeWhatsAppNumber,
+  verifyProKeyForDevice,
+} from '../utils/cryptoLock';
+import { resolveApiBaseUrl } from '../utils/storage';
 
 interface ProUnlockModalProps {
   offers: OfferConfig;
@@ -19,12 +24,13 @@ interface ProUnlockModalProps {
   studentState: StudentLocalState;
   theme: 'dark' | 'light';
   language: LanguageMode;
-  onUpdateMobile: (name: string, mobile: string) => void;
+  onUpdateMobile: (name: string, mobile: string, whatsappNumber?: string) => void;
   onUnlockSuccess: (
     proKey: string,
     couponCode?: string,
     amountPaid?: number,
-    utrNumber?: string
+    utrNumber?: string,
+    whatsappNumber?: string
   ) => void;
   onClose: () => void;
 }
@@ -42,7 +48,9 @@ export const ProUnlockModal: React.FC<ProUnlockModalProps> = ({
 
   const [stepTab, setStepTab] = useState<'plans' | 'activate'>('plans');
   const [studentName, setStudentName] = useState(studentState.studentName || '');
-  const [mobileNumber, setMobileNumber] = useState(studentState.mobileNumber || '');
+  const [mobileNumber, setMobileNumber] = useState(
+    studentState.whatsappNumber || studentState.mobileNumber || ''
+  );
   const [couponInput, setCouponInput] = useState('');
   const [appliedCoupon, setAppliedCoupon] = useState<CouponCode | null>(null);
   const [couponMessage, setCouponMessage] = useState<{ ok: boolean; text: string } | null>(null);
@@ -88,13 +96,24 @@ export const ProUnlockModal: React.FC<ProUnlockModalProps> = ({
   };
 
   const handleSaveIdentity = () => {
-    const cleanPhone = mobileNumber.replace(/\D/g, '').slice(-10);
-    if (cleanPhone.length < 10) {
-      setVerifyMsg({ ok: false, text: 'Please enter a valid 10-digit mobile number.' });
+    const waCheck = normalizeWhatsAppNumber(mobileNumber);
+    if (!waCheck.valid) {
+      setVerifyMsg({
+        ok: false,
+        text: waCheck.error || 'Please enter a valid 10-digit WhatsApp / mobile number.',
+      });
       return;
     }
-    onUpdateMobile(studentName.trim() || 'Aspirant', cleanPhone);
-    setVerifyMsg({ ok: true, text: 'Device ID updated for your mobile number.' });
+    setMobileNumber(waCheck.normalized);
+    onUpdateMobile(
+      studentName.trim() || 'Aspirant',
+      waCheck.localMobile,
+      waCheck.normalized
+    );
+    setVerifyMsg({
+      ok: true,
+      text: `WhatsApp number saved (${waCheck.normalized}) & Device ID updated.`,
+    });
   };
 
   const handleCopyDeviceId = () => {
@@ -103,19 +122,70 @@ export const ProUnlockModal: React.FC<ProUnlockModalProps> = ({
     setTimeout(() => setCopiedDevice(false), 2000);
   };
 
-  const handleVerifyKey = () => {
+  const handleVerifyKey = async () => {
+    const waCheck = normalizeWhatsAppNumber(
+      mobileNumber || studentState.whatsappNumber || studentState.mobileNumber || ''
+    );
+    if (!waCheck.valid) {
+      setVerifyMsg({
+        ok: false,
+        text: waCheck.error || 'Please enter a valid WhatsApp number before activating your Pro Key.',
+      });
+      return;
+    }
+
     const result = verifyProKeyForDevice(studentState.deviceId, proKeyInput);
     if (!result.valid) {
       setVerifyMsg({ ok: false, text: result.message || 'Invalid Pro Key.' });
       return;
     }
-    setVerifyMsg({ ok: true, text: 'Pro Key verified! All exams and tests unlocked.' });
+
+    const cleanKey = proKeyInput.trim().toUpperCase();
+    const base = resolveApiBaseUrl();
+    const deviceSecret = getOrCreateStudentDeviceSecret();
+
+    try {
+      const srvRes = await fetch(`${base}/api/student/key/activate`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Zyvra-Device-Secret': deviceSecret,
+        },
+        body: JSON.stringify({
+          deviceId: studentState.deviceId,
+          deviceSecret,
+          proKey: cleanKey,
+          studentName: studentName.trim() || studentState.studentName || 'Student Aspirant',
+          mobileNumber: waCheck.localMobile,
+          whatsappNumber: waCheck.normalized,
+          utrNumber: utrNumber.trim() || 'DIRECT-KEY',
+          amountPaid: pricing.finalPayable,
+          couponCode: appliedCoupon?.code || 'NONE',
+        }),
+      });
+      if (!srvRes.ok) {
+        const errData = await srvRes.json().catch(() => ({}));
+        setVerifyMsg({
+          ok: false,
+          text: errData.error || 'Activation key verification failed on server.',
+        });
+        return;
+      }
+    } catch {
+      // Offline mode: local device-bound verification already succeeded
+    }
+
+    setVerifyMsg({
+      ok: true,
+      text: `Pro Key verified! Linked to WhatsApp ${waCheck.normalized}. All exams unlocked.`,
+    });
     setTimeout(() => {
       onUnlockSuccess(
-        proKeyInput.trim().toUpperCase(),
+        cleanKey,
         appliedCoupon?.code || 'NONE',
         pricing.finalPayable,
-        utrNumber.trim() || 'DIRECT-KEY'
+        utrNumber.trim() || 'DIRECT-KEY',
+        waCheck.normalized
       );
       onClose();
     }, 600);

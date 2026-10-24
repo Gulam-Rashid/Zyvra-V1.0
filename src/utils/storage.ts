@@ -24,6 +24,8 @@ import {
   generateDeviceId,
   generateReferralCode,
   getActiveAdminSession,
+  getOrCreateStudentDeviceSecret,
+  normalizeWhatsAppNumber,
   verifyProKeyForDevice,
 } from './cryptoLock';
 
@@ -375,8 +377,12 @@ function normalizeSale(s: StudentSaleLog): StudentSaleLog {
   const coupon = s.couponUsed || s.couponCode || 'NONE';
   const key = s.proKey || s.generatedProKey || '';
   const scope = s.unlockedScope || s.examScope || 'Universal All-Exams Pro';
+  const waCheck = normalizeWhatsAppNumber(s.whatsappNumber || s.mobile || '');
   return {
     ...s,
+    mobile: waCheck.valid ? waCheck.localMobile : s.mobile,
+    whatsappNumber: waCheck.valid ? waCheck.normalized : s.whatsappNumber || (s.mobile ? `+91${s.mobile.replace(/\D/g, '').slice(-10)}` : ''),
+    whatsappVerified: Boolean(s.whatsappVerified),
     couponUsed: coupon,
     couponCode: coupon,
     proKey: key,
@@ -761,6 +767,9 @@ export function migrateDatabaseToV3(rawLegacyOrV3: Partial<MasterDatabase>): Mas
     syncAuditLogs: Array.isArray(rawLegacyOrV3.syncAuditLogs)
       ? rawLegacyOrV3.syncAuditLogs
       : seed.syncAuditLogs || [],
+    adminAuditLogs: Array.isArray(rawLegacyOrV3.adminAuditLogs)
+      ? rawLegacyOrV3.adminAuditLogs
+      : [],
   };
 }
 
@@ -816,6 +825,8 @@ export function loadStudentState(): StudentLocalState {
   const initialState: StudentLocalState = {
     studentName: 'Zyvra Exam Aspirant',
     mobileNumber: defaultMobile,
+    whatsappNumber: `+91${defaultMobile}`,
+    whatsappVerified: false,
     deviceId: defaultDeviceId,
     isProUnlocked: false,
     activatedProKey: '',
@@ -927,9 +938,15 @@ export function loadStudentState(): StudentLocalState {
       verifiedPro = check.valid;
     }
 
+    const waNorm = normalizeWhatsAppNumber(
+      parsed.whatsappNumber || parsed.mobileNumber || defaultMobile
+    );
+
     return {
       ...initialState,
       ...parsed,
+      whatsappNumber: waNorm.valid ? waNorm.normalized : `+91${(parsed.mobileNumber || defaultMobile).replace(/\D/g, '').slice(-10)}`,
+      whatsappVerified: Boolean(parsed.whatsappVerified),
       deviceId: currentDeviceId,
       referralCode: parsed.referralCode || generateReferralCode(currentDeviceId),
       isProUnlocked: verifiedPro,
@@ -1346,14 +1363,25 @@ export async function syncWithCloudBackend(
   try {
     await flushOfflineSyncQueue();
 
-    // 1. Push latest student state (idempotent merge on backend)
+    const deviceSecret = getOrCreateStudentDeviceSecret();
+    const studentHeaders: Record<string, string> = {
+      'Content-Type': 'application/json',
+      'X-Zyvra-Device-Secret': deviceSecret,
+    };
+    if (currentStudent.studentSessionToken) {
+      studentHeaders['X-Zyvra-Student-Token'] = currentStudent.studentSessionToken;
+    }
+
+    // 1. Push latest student state (idempotent merge on backend + device binding)
     const pushRes = await fetch(`${base}/api/sync/student`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: studentHeaders,
       credentials: 'include',
       body: JSON.stringify({
         deviceId: currentStudent.deviceId,
+        deviceSecret,
         mobileNumber: currentStudent.mobileNumber,
+        whatsappNumber: currentStudent.whatsappNumber,
         studentState: currentStudent,
       }),
     });
@@ -1365,7 +1393,13 @@ export async function syncWithCloudBackend(
       )}&mobile=${encodeURIComponent(currentStudent.mobileNumber || '')}`,
       {
         method: 'GET',
-        headers: { Accept: 'application/json' },
+        headers: {
+          Accept: 'application/json',
+          'X-Zyvra-Device-Secret': deviceSecret,
+          ...(currentStudent.studentSessionToken
+            ? { 'X-Zyvra-Student-Token': currentStudent.studentSessionToken }
+            : {}),
+        },
         credentials: 'include',
       }
     );
@@ -1382,6 +1416,7 @@ export async function syncWithCloudBackend(
 
     let mergedStudent: StudentLocalState = {
       ...currentStudent,
+      studentSessionToken: data.studentSessionToken || currentStudent.studentSessionToken,
       syncStatus: 'synced',
       lastSyncedAt: syncedAt,
       lastCloudSyncedAt: syncedAt,

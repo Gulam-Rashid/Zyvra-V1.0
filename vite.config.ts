@@ -99,6 +99,7 @@ export default defineConfig(({ command }) => {
     },
     server: {
       hmr: false,
+      ws: false,
       watch: process.env.DISABLE_HMR === 'true' ? null : undefined,
     },
   };

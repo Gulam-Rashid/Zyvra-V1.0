@@ -60,6 +60,12 @@
       </p>
     </div>
     <script>
+      window.addEventListener('unhandledrejection', function (event) {
+        var msg = event && event.reason && (event.reason.message || String(event.reason));
+        if (typeof msg === 'string' && msg.indexOf('WebSocket closed without opened') !== -1) {
+          event.preventDefault();
+        }
+      });
       (function () {
         var splash = document.getElementById('zyvra-launch-splash');
         if (!splash) return;

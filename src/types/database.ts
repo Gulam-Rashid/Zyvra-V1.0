@@ -519,6 +519,10 @@ export interface StudentSaleLog {
   id: string;
   studentName: string;
   mobile: string;
+  whatsappNumber?: string;
+  whatsappVerified?: boolean;
+  whatsappUpdatedAt?: string;
+  whatsappUpdatedBy?: string;
   deviceId: string;
   utrNumber: string;
   amountPaid: number;
@@ -533,6 +537,37 @@ export interface StudentSaleLog {
   examScope?: string;
   createdAt?: string;
   activatedAt?: string;
+  keyExpiresAt?: string | number;
+  keyRevoked?: boolean;
+}
+
+export interface AdminSecurityAuditEntry {
+  id: string;
+  action:
+    | 'UPDATE_STUDENT_WHATSAPP'
+    | 'ADMIN_USERNAME_CHANGE'
+    | 'ADMIN_PASSWORD_CHANGE'
+    | 'ADMIN_CREDENTIAL_CHANGE'
+    | 'STUDENT_SESSION_REVOKE'
+    | 'STUDENT_KEY_ISSUE'
+    | 'student_whatsapp_updated'
+    | 'admin_username_changed'
+    | 'admin_password_changed'
+    | 'admin_both_changed'
+    | 'student_key_revoked'
+    | 'student_key_restored'
+    | string;
+  actorAdminId: string;
+  targetDeviceId?: string | null;
+  targetSaleId?: string | null;
+  studentName?: string;
+  targetStudentName?: string;
+  oldValue?: string;
+  newValue?: string;
+  updateScope?: 'sale_only' | 'profile_only' | 'both';
+  summary?: string;
+  details?: string;
+  timestamp: string;
 }
 
 export interface ImportBatchHistory {
@@ -598,6 +633,7 @@ export interface MasterDatabase {
   referralCommissions?: ReferralCommissionRecord[];
   importHistory?: ImportBatchHistory[];
   syncAuditLogs?: SyncAuditLog[];
+  adminAuditLogs?: AdminSecurityAuditEntry[];
 }
 
 export interface MistakeEntry {
@@ -652,7 +688,10 @@ export interface TestAttemptRecord {
 export interface StudentLocalState {
   studentName: string;
   mobileNumber: string;
+  whatsappNumber?: string;
+  whatsappVerified?: boolean;
   deviceId: string;
+  studentSessionToken?: string;
   referralCode?: string;
   referredByCode?: string;
   payoutUpiId?: string;
@@ -661,6 +700,7 @@ export interface StudentLocalState {
   unlockedExamPacks?: string[];
   activatedProKey: string;
   activatedAt: string | null;
+  keyExpiresAt?: string | number | null;
   recentlyPracticedExamIds?: string[];
   recentExamNames?: string[];
   activeExamId?: string;

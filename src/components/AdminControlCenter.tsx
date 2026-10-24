@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   AlertTriangle,
   BookOpen,
@@ -37,6 +37,7 @@ import {
   X,
 } from 'lucide-react';
 import {
+  AdminSecurityAuditEntry,
   CommissionStatus,
   CouponCode,
   CustomFolder,
@@ -68,6 +69,7 @@ import {
   getActiveAdminSession,
   hasLocalAdminCredentials,
   initializeOrUpdateLocalAdminCredentials,
+  normalizeWhatsAppNumber,
   saveAdminSession,
   verifyGitHubRepoOwnershipForReset,
   verifyLocalAdminCredentials,
@@ -156,10 +158,6 @@ export const AdminControlCenter: React.FC<AdminControlCenterProps> = ({
   const [loginError, setLoginError] = useState('');
   const [loginSuccessMsg, setLoginSuccessMsg] = useState('');
   const [loginBusy, setLoginBusy] = useState(false);
-
-  // Credentials Update State inside Security Tab
-  const [newAdminLoginId, setNewAdminLoginId] = useState('');
-  const [newAdminPasscode, setNewAdminPasscode] = useState('');
 
   // Navigation & Status
   const [activeSection, setActiveSection] = useState<AdminSection>('overview');
@@ -359,7 +357,7 @@ export const AdminControlCenter: React.FC<AdminControlCenterProps> = ({
   const [noteIsPro, setNoteIsPro] = useState(false);
 
   // ============================================================================
-  // 7. STUDENTS & PRO KEY GENERATOR STATE
+  // 7. STUDENTS & PRO KEY GENERATOR + WHATSAPP MANAGEMENT STATE
   // ============================================================================
   const [genStudentName, setGenStudentName] = useState('');
   const [genMobile, setGenMobile] = useState('');
@@ -368,6 +366,35 @@ export const AdminControlCenter: React.FC<AdminControlCenterProps> = ({
   const [genAmount, setGenAmount] = useState(String(db.offers.offerPrice || 149));
   const [genScope, setGenScope] = useState('Universal All-Exams Pro');
   const [generatedKeyOutput, setGeneratedKeyOutput] = useState('');
+
+  interface UnifiedStudentRecord {
+    recordType: 'sale_and_profile' | 'sale_only' | 'profile_only';
+    saleId: string | null;
+    studentName: string;
+    deviceId: string;
+    mobile: string;
+    whatsappNumber: string;
+    whatsappVerified: boolean;
+    whatsappUpdatedAt: string | null;
+    whatsappUpdatedBy: string | null;
+    proKey: string;
+    utrNumber: string;
+    amountPaid: number;
+    paymentStatus: string;
+    activatedAt: string;
+    keyExpiresAt: string | null;
+    keyRevoked: boolean;
+    testHistoryCount: number;
+  }
+
+  const [serverStudents, setServerStudents] = useState<UnifiedStudentRecord[]>([]);
+  const [studentSearchQuery, setStudentSearchQuery] = useState('');
+  const [editingStudentWa, setEditingStudentWa] = useState<UnifiedStudentRecord | null>(null);
+  const [editWaNewValue, setEditWaNewValue] = useState('');
+  const [editWaScope, setEditWaScope] = useState<'both' | 'sale_only' | 'profile_only'>('both');
+  const [editWaConfirmed, setEditWaConfirmed] = useState(false);
+  const [editWaBusy, setEditWaBusy] = useState(false);
+  const [editWaFeedback, setEditWaFeedback] = useState<{ ok: boolean; text: string } | null>(null);
 
   // ============================================================================
   // 8. PRICING & COUPONS STATE
@@ -379,15 +406,117 @@ export const AdminControlCenter: React.FC<AdminControlCenterProps> = ({
   const [newCouponTag, setNewCouponTag] = useState('Educator Campaign');
 
   // ============================================================================
-  // 9. CLOUD SYNC STATE
+  // 9. CLOUD SYNC & SECURE ADMIN ACCOUNT SETTINGS (EMAIL OTP) STATE
   // ============================================================================
   const [ghConfig, setGhConfig] = useState<GitHubSyncConfig>(() => loadGitHubSyncConfig());
   const [syncBusy, setSyncBusy] = useState(false);
+
+  const [adminSecInfo, setAdminSecInfo] = useState<{
+    loginId: string;
+    sessionVersion: number;
+    updatedAt: string;
+    emailOtpConfigured: boolean;
+    smtpConfigured: boolean;
+    auditLogs: AdminSecurityAuditEntry[];
+  } | null>(null);
+  const [secActionType, setSecActionType] = useState<
+    'change_username' | 'change_password' | 'change_both'
+  >('change_password');
+  const [secCurrentPassword, setSecCurrentPassword] = useState('');
+  const [secNewLoginId, setSecNewLoginId] = useState('');
+  const [secNewPassword, setSecNewPassword] = useState('');
+  const [secConfirmPassword, setSecConfirmPassword] = useState('');
+  const [secOtpChallengeId, setSecOtpChallengeId] = useState<string | null>(null);
+  const [secOtpCode, setSecOtpCode] = useState('');
+  const [secOtpExpiresAt, setSecOtpExpiresAt] = useState<string | null>(null);
+  const [secBusy, setSecBusy] = useState(false);
+  const [secFeedback, setSecFeedback] = useState<{ ok: boolean; text: string } | null>(null);
 
   const apiBaseUrl =
     (typeof import.meta !== 'undefined' &&
       (import.meta as unknown as { env?: Record<string, string> }).env?.VITE_API_BASE_URL) ||
     '';
+
+  const fetchServerStudents = useCallback(async (search = '') => {
+    const base = apiBaseUrl.trim().replace(/\/$/, '');
+    try {
+      const qs = search.trim() ? `?q=${encodeURIComponent(search.trim())}` : '';
+      const res = await fetch(`${base}/api/admin/students${qs}`, {
+        headers: getAdminAuthHeaders(),
+        credentials: 'include',
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data.students)) {
+          setServerStudents(data.students);
+          return;
+        }
+      }
+    } catch {
+      // Fallback to local db.salesLog when offline
+    }
+    const localRows: UnifiedStudentRecord[] = (db.salesLog || []).map((sale) => {
+      const norm = normalizeWhatsAppNumber(sale.whatsappNumber || sale.mobile || '');
+      return {
+        recordType: 'sale_only',
+        saleId: sale.id,
+        studentName: sale.studentName,
+        deviceId: sale.deviceId,
+        mobile: sale.mobile,
+        whatsappNumber: norm.valid ? norm.normalized : sale.whatsappNumber || `+91${sale.mobile}`,
+        whatsappVerified: Boolean(sale.whatsappVerified),
+        whatsappUpdatedAt: sale.whatsappUpdatedAt || null,
+        whatsappUpdatedBy: sale.whatsappUpdatedBy || null,
+        proKey: sale.proKey || sale.generatedProKey || '',
+        utrNumber: sale.utrNumber,
+        amountPaid: sale.amountPaid,
+        paymentStatus: sale.paymentStatus || 'paid',
+        activatedAt: sale.activatedAt || sale.createdAt || '',
+        keyExpiresAt: sale.keyExpiresAt ? String(sale.keyExpiresAt) : null,
+        keyRevoked: Boolean(sale.keyRevoked),
+        testHistoryCount: 0,
+      };
+    });
+    setServerStudents(localRows);
+  }, [apiBaseUrl, db.salesLog]);
+
+  const fetchAdminSecurityInfo = useCallback(async () => {
+    const base = apiBaseUrl.trim().replace(/\/$/, '');
+    try {
+      const res = await fetch(`${base}/api/admin/account/info`, {
+        headers: getAdminAuthHeaders(),
+        credentials: 'include',
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setAdminSecInfo({
+          loginId: data.loginId,
+          sessionVersion: data.sessionVersion || 1,
+          updatedAt: data.updatedAt || new Date().toISOString(),
+          emailOtpConfigured: Boolean(data.emailOtpConfigured),
+          smtpConfigured: Boolean(data.smtpConfigured),
+          auditLogs: Array.isArray(data.auditLogs) ? data.auditLogs : [],
+        });
+      }
+    } catch {
+      // Offline mode
+    }
+  }, [apiBaseUrl]);
+
+  useEffect(() => {
+    if (!adminSession) return;
+    if (activeSection === 'students') {
+      fetchServerStudents(studentSearchQuery);
+    } else if (activeSection === 'sync') {
+      fetchAdminSecurityInfo();
+    }
+  }, [
+    adminSession,
+    activeSection,
+    studentSearchQuery,
+    fetchServerStudents,
+    fetchAdminSecurityInfo,
+  ]);
 
   // Filtered Question Bank
   const filteredQuestions = useMemo(() => {
@@ -530,7 +659,7 @@ export const AdminControlCenter: React.FC<AdminControlCenterProps> = ({
       return;
     }
 
-    // Path 2C: Sign-In (Checks unified same-origin backend first, then local salted SHA-256)
+    // Path 2C: Sign-In (Checks unified same-origin backend first, then local salted SHA-256 only if backend is unreachable)
     try {
       const srvRes = await fetch('/api/admin/login', {
         method: 'POST',
@@ -557,8 +686,14 @@ export const AdminControlCenter: React.FC<AdminControlCenterProps> = ({
         setLoginBusy(false);
         return;
       }
+      if (srvRes.status === 401 || srvRes.status === 429) {
+        const errData = await srvRes.json().catch(() => ({}));
+        setLoginError(errData.error || 'Invalid Admin Login ID or Passcode.');
+        setLoginBusy(false);
+        return;
+      }
     } catch {
-      // Fall through to local salted hash verification when offline or static
+      // Fall through to local salted hash verification only when offline or static deployment
     }
 
     const check = await verifyLocalAdminCredentials(loginIdInput, passcodeInput);
@@ -1357,6 +1492,12 @@ export const AdminControlCenter: React.FC<AdminControlCenterProps> = ({
       notify('Enter the student Device Lock ID (e.g. ZYV-8492-X7B).', false);
       return;
     }
+    const rawMobile = genMobile.trim() || '9876543210';
+    const waCheck = normalizeWhatsAppNumber(rawMobile);
+    if (!waCheck.valid) {
+      notify(waCheck.error || 'Enter a valid WhatsApp/mobile number.', false);
+      return;
+    }
     const proKey = generateProKey(genDeviceId.trim());
     if (!proKey) {
       notify('Invalid Device ID format. Expected ZYV-XXXX-XXX or SSC-XXXX-XXX.', false);
@@ -1367,7 +1508,9 @@ export const AdminControlCenter: React.FC<AdminControlCenterProps> = ({
     const newSale: StudentSaleLog = {
       id: `sale-${Date.now()}`,
       studentName: genStudentName.trim() || 'Student Aspirant',
-      mobile: genMobile.trim() || '9876543210',
+      mobile: waCheck.localMobile,
+      whatsappNumber: waCheck.normalized,
+      whatsappVerified: false,
       deviceId: genDeviceId.trim().toUpperCase(),
       utrNumber: genUtr.trim() || 'UPI-VERIFIED',
       amountPaid: parseFloat(genAmount) || db.offers.offerPrice || 149,
@@ -1381,7 +1524,290 @@ export const AdminControlCenter: React.FC<AdminControlCenterProps> = ({
       ...db,
       salesLog: [newSale, ...(db.salesLog || [])],
     });
-    notify(`Generated Device-Locked Pro Key: ${proKey}`);
+    notify(`Generated Device-Locked Pro Key: ${proKey} (WhatsApp: ${waCheck.normalized})`);
+  };
+
+  const handleSaveStudentWhatsApp = async () => {
+    if (!editingStudentWa) return;
+    setEditWaFeedback(null);
+    const waCheck = normalizeWhatsAppNumber(editWaNewValue);
+    if (!waCheck.valid) {
+      setEditWaFeedback({ ok: false, text: waCheck.error || 'Invalid WhatsApp number format.' });
+      return;
+    }
+    if (!editWaConfirmed) {
+      setEditWaFeedback({
+        ok: false,
+        text: 'Please check the confirmation box acknowledging the impact before saving.',
+      });
+      return;
+    }
+
+    setEditWaBusy(true);
+    const base = apiBaseUrl.trim().replace(/\/$/, '');
+    try {
+      const res = await fetch(`${base}/api/admin/students/whatsapp`, {
+        method: 'PATCH',
+        headers: getAdminAuthHeaders(),
+        credentials: 'include',
+        body: JSON.stringify({
+          saleId: editingStudentWa.saleId,
+          deviceId: editingStudentWa.deviceId,
+          whatsappNumber: waCheck.normalized,
+          updateScope: editWaScope,
+          confirmImpact: true,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setEditWaFeedback({
+          ok: false,
+          text: data.error || 'Failed to update student WhatsApp number on server.',
+        });
+        setEditWaBusy(false);
+        return;
+      }
+
+      const nowIso = new Date().toISOString();
+      const updatedSales = (db.salesLog || []).map((s) => {
+        const matchesSale = editingStudentWa.saleId && s.id === editingStudentWa.saleId;
+        const matchesDevice =
+          !editingStudentWa.saleId && s.deviceId === editingStudentWa.deviceId;
+        if ((matchesSale || matchesDevice) && (editWaScope === 'both' || editWaScope === 'sale_only')) {
+          return {
+            ...s,
+            mobile: waCheck.localMobile,
+            whatsappNumber: waCheck.normalized,
+            whatsappVerified: false,
+            whatsappUpdatedAt: nowIso,
+            whatsappUpdatedBy: adminSession?.loginId || 'admin',
+          };
+        }
+        return s;
+      });
+
+      const nextAuditLogs = data.auditEntry
+        ? [data.auditEntry, ...(db.adminAuditLogs || [])]
+        : db.adminAuditLogs || [];
+
+      onUpdateDatabase({
+        ...db,
+        salesLog: updatedSales,
+        adminAuditLogs: nextAuditLogs,
+      });
+
+      await fetchServerStudents(studentSearchQuery);
+      setEditWaBusy(false);
+      setEditingStudentWa(null);
+      setEditWaConfirmed(false);
+      notify(data.message || `Updated WhatsApp number to ${waCheck.normalized}`);
+    } catch {
+      setEditWaFeedback({
+        ok: false,
+        text: 'Network error while saving WhatsApp number to backend.',
+      });
+      setEditWaBusy(false);
+    }
+  };
+
+  const handleToggleStudentKeyRevoke = async (student: UnifiedStudentRecord) => {
+    const base = apiBaseUrl.trim().replace(/\/$/, '');
+    const nextRevoked = !student.keyRevoked;
+    try {
+      const res = await fetch(`${base}/api/admin/students/key-status`, {
+        method: 'POST',
+        headers: getAdminAuthHeaders(),
+        credentials: 'include',
+        body: JSON.stringify({
+          saleId: student.saleId,
+          deviceId: student.deviceId,
+          keyRevoked: nextRevoked,
+          keyExpiresAt: student.keyExpiresAt,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        notify(data.error || 'Failed to update key status.', false);
+        return;
+      }
+      const updatedSales = (db.salesLog || []).map((s) =>
+        (student.saleId && s.id === student.saleId) || s.deviceId === student.deviceId
+          ? { ...s, keyRevoked: nextRevoked }
+          : s
+      );
+      onUpdateDatabase({
+        ...db,
+        salesLog: updatedSales,
+      });
+      await fetchServerStudents(studentSearchQuery);
+      notify(data.message || (nextRevoked ? 'Key revoked.' : 'Key restored.'));
+    } catch {
+      notify('Could not reach backend to update key status.', false);
+    }
+  };
+
+  const handleRequestAdminEmailOtp = async () => {
+    setSecFeedback(null);
+    if (!secCurrentPassword) {
+      setSecFeedback({ ok: false, text: 'Enter your current Admin Password first.' });
+      return;
+    }
+    if (
+      (secActionType === 'change_username' || secActionType === 'change_both') &&
+      secNewLoginId.trim().length < 4
+    ) {
+      setSecFeedback({
+        ok: false,
+        text: 'New Admin Login ID must be between 4 and 32 characters.',
+      });
+      return;
+    }
+    if (secActionType === 'change_password' || secActionType === 'change_both') {
+      if (secNewPassword.length < 8) {
+        setSecFeedback({
+          ok: false,
+          text: 'New Admin Password must be at least 8 characters long.',
+        });
+        return;
+      }
+      if (secNewPassword !== secConfirmPassword) {
+        setSecFeedback({
+          ok: false,
+          text: 'New Password and Confirm New Password do not match.',
+        });
+        return;
+      }
+    }
+
+    setSecBusy(true);
+    const base = apiBaseUrl.trim().replace(/\/$/, '');
+    try {
+      const res = await fetch(`${base}/api/admin/account/request-otp`, {
+        method: 'POST',
+        headers: getAdminAuthHeaders(),
+        credentials: 'include',
+        body: JSON.stringify({
+          actionType: secActionType,
+          currentPassword: secCurrentPassword,
+          newLoginId:
+            secActionType === 'change_username' || secActionType === 'change_both'
+              ? secNewLoginId.trim()
+              : undefined,
+          newPassword:
+            secActionType === 'change_password' || secActionType === 'change_both'
+              ? secNewPassword
+              : undefined,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      setSecBusy(false);
+      if (!res.ok) {
+        setSecFeedback({
+          ok: false,
+          text: data.error || 'Could not send Email OTP verification code.',
+        });
+        return;
+      }
+      setSecOtpChallengeId(data.challengeId);
+      setSecOtpExpiresAt(data.expiresAt || null);
+      setSecOtpCode('');
+      setSecFeedback({
+        ok: true,
+        text:
+          data.message ||
+          'A 6-digit verification code has been sent to the private administrator email.',
+      });
+    } catch {
+      setSecBusy(false);
+      setSecFeedback({
+        ok: false,
+        text: 'Could not reach backend server to request Email OTP.',
+      });
+    }
+  };
+
+  const handleVerifyAdminEmailOtpAndSave = async () => {
+    if (!secOtpChallengeId) return;
+    setSecFeedback(null);
+    if (!/^\d{6}$/.test(secOtpCode.trim())) {
+      setSecFeedback({ ok: false, text: 'Enter the 6-digit verification code from your email.' });
+      return;
+    }
+
+    setSecBusy(true);
+    const base = apiBaseUrl.trim().replace(/\/$/, '');
+    try {
+      const res = await fetch(`${base}/api/admin/account/verify-and-update`, {
+        method: 'POST',
+        headers: getAdminAuthHeaders(),
+        credentials: 'include',
+        body: JSON.stringify({
+          challengeId: secOtpChallengeId,
+          otpCode: secOtpCode.trim(),
+          currentPassword: secCurrentPassword,
+          newLoginId:
+            secActionType === 'change_username' || secActionType === 'change_both'
+              ? secNewLoginId.trim()
+              : undefined,
+          newPassword:
+            secActionType === 'change_password' || secActionType === 'change_both'
+              ? secNewPassword
+              : undefined,
+          confirmNewPassword:
+            secActionType === 'change_password' || secActionType === 'change_both'
+              ? secConfirmPassword
+              : undefined,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      setSecBusy(false);
+      if (!res.ok) {
+        setSecFeedback({
+          ok: false,
+          text: data.error || 'OTP verification failed.',
+        });
+        return;
+      }
+
+      const updatedLoginId = data.loginId || adminSession?.loginId || 'admin';
+      const effectivePassword =
+        secActionType === 'change_password' || secActionType === 'change_both'
+          ? secNewPassword
+          : secCurrentPassword;
+      await initializeOrUpdateLocalAdminCredentials(updatedLoginId, effectivePassword);
+
+      const nextSession: AdminSession = {
+        loginId: updatedLoginId,
+        mode: 'backend_jwt',
+        token: data.token,
+        authenticatedAt: new Date().toLocaleTimeString('en-IN'),
+        expiresAt: Date.now() + 8 * 60 * 60 * 1000,
+      };
+      saveAdminSession(nextSession);
+      setAdminSession(nextSession);
+
+      // Clear sensitive inputs immediately
+      setSecCurrentPassword('');
+      setSecNewLoginId('');
+      setSecNewPassword('');
+      setSecConfirmPassword('');
+      setSecOtpCode('');
+      setSecOtpChallengeId(null);
+      setSecOtpExpiresAt(null);
+
+      await fetchAdminSecurityInfo();
+      setSecFeedback({
+        ok: true,
+        text: data.message || 'Admin credentials updated and re-authenticated.',
+      });
+      notify(data.message || 'Admin credentials updated.');
+    } catch {
+      setSecBusy(false);
+      setSecFeedback({
+        ok: false,
+        text: 'Network error while verifying OTP.',
+      });
+    }
   };
 
   const handlePushGitHub = async () => {
@@ -3428,14 +3854,16 @@ export const AdminControlCenter: React.FC<AdminControlCenterProps> = ({
             )}
 
             {/* ================================================================
-                SECTION 8: STUDENTS & PRO ACCESS KEY GENERATOR
+                SECTION 8: STUDENTS, WHATSAPP MANAGEMENT & PRO KEY GENERATOR
                ================================================================ */}
             {activeSection === 'students' && (
               <div className="space-y-6">
                 <div>
-                  <h2 className="text-lg font-bold">Students & Local Device-Bound Pro Keys</h2>
+                  <h2 className="text-lg font-bold">
+                    Student WhatsApp Directory & Device-Bound Pro Keys
+                  </h2>
                   <p className="text-xs text-slate-400">
-                    Generate device-bound Pro Activation Keys from a student's Zyvra Device ID (`ZYV-XXXX-XXX`) and track UTR payments.
+                    View, search, and manage student WhatsApp numbers (stored in normalized E.164 format), generate device-locked Pro Keys (`ZYV-XXXX-XXX`), and audit all contact changes without mutating keys, payments, or test history.
                   </p>
                 </div>
 
@@ -3461,7 +3889,7 @@ export const AdminControlCenter: React.FC<AdminControlCenterProps> = ({
                       type="tel"
                       value={genMobile}
                       onChange={(e) => setGenMobile(e.target.value)}
-                      placeholder="Student Mobile (10 digits)"
+                      placeholder="Student WhatsApp (+919876543210 or 10 digits)"
                       className={`min-h-[42px] rounded-xl border px-3 text-xs outline-none ${
                         isDark
                           ? 'border-white/10 bg-white/5 text-white'
@@ -3535,35 +3963,313 @@ export const AdminControlCenter: React.FC<AdminControlCenterProps> = ({
                   )}
                 </div>
 
-                {/* Sales Log Table */}
+                {/* Inline Student WhatsApp Edit & Confirmation Panel */}
+                {editingStudentWa && (
+                  <div className="rounded-2xl border-2 border-indigo-500/50 bg-indigo-950/30 p-5 space-y-4">
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <span className="text-[11px] font-bold uppercase tracking-wider text-indigo-400">
+                          Edit Student WhatsApp Number (Admin Audited)
+                        </span>
+                        <h3 className="mt-0.5 text-sm font-bold text-white">
+                          {editingStudentWa.studentName} · Device ID:{' '}
+                          <span className="font-mono text-indigo-300">
+                            {editingStudentWa.deviceId}
+                          </span>
+                        </h3>
+                        <p className="text-xs text-slate-400">
+                          Current WhatsApp:{' '}
+                          <strong className="font-mono text-slate-200">
+                            {editingStudentWa.whatsappNumber}
+                          </strong>{' '}
+                          · Pro Key:{' '}
+                          <strong className="font-mono text-slate-200">
+                            {editingStudentWa.proKey || 'None'}
+                          </strong>
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setEditingStudentWa(null);
+                          setEditWaFeedback(null);
+                          setEditWaConfirmed(false);
+                        }}
+                        className="rounded-lg p-1.5 text-slate-400 hover:text-white"
+                      >
+                        <X className="h-4 w-4" />
+                      </button>
+                    </div>
+
+                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                      <div>
+                        <label className="block text-xs font-semibold text-slate-300 mb-1">
+                          New WhatsApp Number (E.164 with Country Code or 10-digit IN)
+                        </label>
+                        <input
+                          type="tel"
+                          value={editWaNewValue}
+                          onChange={(e) => setEditWaNewValue(e.target.value)}
+                          placeholder="+919876543210"
+                          className="min-h-[42px] w-full rounded-xl border border-white/15 bg-white/5 px-3.5 font-mono text-xs text-white outline-none focus:border-indigo-400"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs font-semibold text-slate-300 mb-1">
+                          Record Update Scope
+                        </label>
+                        <select
+                          value={editWaScope}
+                          onChange={(e) =>
+                            setEditWaScope(
+                              e.target.value as 'both' | 'sale_only' | 'profile_only'
+                            )
+                          }
+                          className="min-h-[42px] w-full rounded-xl border border-white/15 bg-slate-900 px-3 text-xs text-white outline-none"
+                        >
+                          <option value="both">
+                            Update Both Key Purchase Record & Student Device Profile
+                          </option>
+                          <option value="sale_only">
+                            Update Key Purchase Record Only (salesLog)
+                          </option>
+                          <option value="profile_only">
+                            Update Student Device Profile Only (studentStates)
+                          </option>
+                        </select>
+                      </div>
+                    </div>
+
+                    <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-200 leading-relaxed">
+                      <strong>Data Integrity & Ownership Notice:</strong> Changing a student's WhatsApp number updates their contact record only. It does <strong>not</strong> verify phone ownership (status remains <em>Unverified</em>), and it will <strong>never</strong> alter the student's Device Lock ID (<code>{editingStudentWa.deviceId}</code>), Pro Key (<code>{editingStudentWa.proKey || 'N/A'}</code>), UTR (<code>{editingStudentWa.utrNumber}</code>), payment amount (₹{editingStudentWa.amountPaid}), or test history ({editingStudentWa.testHistoryCount} attempts).
+                    </div>
+
+                    <label className="flex items-start gap-2.5 text-xs text-slate-200 cursor-pointer select-none">
+                      <input
+                        type="checkbox"
+                        checked={editWaConfirmed}
+                        onChange={(e) => setEditWaConfirmed(e.target.checked)}
+                        className="mt-0.5 h-4 w-4 rounded border-white/20 accent-indigo-500"
+                      />
+                      <span>
+                        I confirm this WhatsApp number change from{' '}
+                        <code className="font-mono text-amber-300">
+                          {editingStudentWa.whatsappNumber}
+                        </code>{' '}
+                        to{' '}
+                        <code className="font-mono text-emerald-300">
+                          {editWaNewValue.trim() || '...'}
+                        </code>{' '}
+                        and understand that this change will be recorded in the Admin Audit Log.
+                      </span>
+                    </label>
+
+                    {editWaFeedback && (
+                      <div
+                        className={`rounded-xl border px-3 py-2 text-xs font-semibold ${
+                          editWaFeedback.ok
+                            ? 'border-emerald-500/40 bg-emerald-500/15 text-emerald-300'
+                            : 'border-rose-500/40 bg-rose-500/15 text-rose-300'
+                        }`}
+                      >
+                        {editWaFeedback.text}
+                      </div>
+                    )}
+
+                    <div className="flex flex-wrap justify-end gap-2.5">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setEditingStudentWa(null);
+                          setEditWaFeedback(null);
+                          setEditWaConfirmed(false);
+                        }}
+                        className="min-h-[40px] rounded-xl border border-white/15 px-4 text-xs font-semibold text-slate-300"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        type="button"
+                        disabled={editWaBusy}
+                        onClick={handleSaveStudentWhatsApp}
+                        className="min-h-[40px] rounded-xl bg-indigo-600 px-4 text-xs font-bold text-white hover:bg-indigo-500 disabled:opacity-50"
+                      >
+                        {editWaBusy ? 'Saving...' : 'Confirm & Save WhatsApp Number'}
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {/* Unified Student Search & WhatsApp Management Table */}
+                <div
+                  className={`rounded-2xl p-5 ${
+                    isDark ? 'surface-card-dark' : 'surface-card-light'
+                  }`}
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div>
+                      <h3 className="text-sm font-bold">
+                        Student Directory, Key Ownership & WhatsApp Management ({serverStudents.length})
+                      </h3>
+                      <p className="text-xs text-slate-400">
+                        Search by Student Name, Device Lock ID, Pro Key, UTR, or WhatsApp Number.
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-2 w-full sm:w-auto">
+                      <div className="relative flex-1 sm:w-72">
+                        <Search className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-400" />
+                        <input
+                          type="text"
+                          value={studentSearchQuery}
+                          onChange={(e) => setStudentSearchQuery(e.target.value)}
+                          placeholder="Search name, ZYV-ID, PRO-key, +91..."
+                          className={`min-h-[38px] w-full rounded-xl border pl-8 pr-3 text-xs outline-none ${
+                            isDark
+                              ? 'border-white/10 bg-white/5 text-white'
+                              : 'border-slate-200 bg-white text-slate-900'
+                          }`}
+                        />
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => fetchServerStudents(studentSearchQuery)}
+                        className="inline-flex min-h-[38px] items-center gap-1 rounded-xl border border-white/10 px-3 text-xs font-semibold text-slate-300 hover:bg-white/5"
+                        title="Refresh Student Directory"
+                      >
+                        <RefreshCw className="h-3.5 w-3.5" />
+                        Refresh
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="mt-4 divide-y divide-white/10">
+                    {serverStudents.length === 0 ? (
+                      <p className="py-6 text-center text-xs text-slate-400">
+                        No matching student or key purchase records found.
+                      </p>
+                    ) : (
+                      serverStudents.map((stu) => (
+                        <div
+                          key={`${stu.saleId || 'profile'}-${stu.deviceId}`}
+                          className="flex flex-wrap items-center justify-between gap-3 py-3.5 text-xs"
+                        >
+                          <div className="space-y-1">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <span className="font-bold text-sm">{stu.studentName}</span>
+                              <span className="font-mono font-bold text-emerald-400 tabular-nums">
+                                {stu.whatsappNumber}
+                              </span>
+                              <span className="rounded-md border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-[10px] font-semibold text-amber-300">
+                                {stu.whatsappVerified ? 'Verified' : 'Unverified (Contact Record)'}
+                              </span>
+                              {stu.keyRevoked && (
+                                <span className="rounded-md border border-rose-500/40 bg-rose-500/15 px-2 py-0.5 text-[10px] font-bold text-rose-300">
+                                  KEY REVOKED
+                                </span>
+                              )}
+                            </div>
+                            <p className="font-mono text-slate-400">
+                              Device Lock: <span className="text-slate-200">{stu.deviceId}</span> ·
+                              Key: <span className="text-indigo-300">{stu.proKey || 'Free Tier'}</span>{' '}
+                              · UTR: {stu.utrNumber} · Paid: ₹{stu.amountPaid} · Tests:{' '}
+                              {stu.testHistoryCount}
+                            </p>
+                            {stu.whatsappUpdatedAt && (
+                              <p className="text-[11px] text-slate-400">
+                                Last WhatsApp edit:{' '}
+                                {new Date(stu.whatsappUpdatedAt).toLocaleString('en-IN')} by{' '}
+                                <span className="font-semibold text-slate-300">
+                                  {stu.whatsappUpdatedBy || 'admin'}
+                                </span>
+                              </p>
+                            )}
+                          </div>
+
+                          <div className="flex flex-wrap items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setEditingStudentWa(stu);
+                                setEditWaNewValue(stu.whatsappNumber);
+                                setEditWaScope('both');
+                                setEditWaConfirmed(false);
+                                setEditWaFeedback(null);
+                              }}
+                              className="inline-flex min-h-[36px] items-center gap-1.5 rounded-xl bg-indigo-600/90 px-3 text-xs font-bold text-white hover:bg-indigo-500"
+                            >
+                              <Edit3 className="h-3.5 w-3.5" />
+                              Edit WhatsApp
+                            </button>
+                            {stu.proKey && (
+                              <button
+                                type="button"
+                                onClick={() => handleToggleStudentKeyRevoke(stu)}
+                                className={`inline-flex min-h-[36px] items-center gap-1 rounded-xl border px-3 text-xs font-semibold ${
+                                  stu.keyRevoked
+                                    ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300'
+                                    : 'border-rose-500/40 bg-rose-500/10 text-rose-300'
+                                }`}
+                              >
+                                {stu.keyRevoked ? 'Restore Key' : 'Revoke Key'}
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </div>
+
+                {/* Student WhatsApp Audit Log */}
                 <div
                   className={`rounded-2xl p-5 ${
                     isDark ? 'surface-card-dark' : 'surface-card-light'
                   }`}
                 >
                   <h3 className="text-sm font-bold">
-                    Student Sales & Activation Log ({(db.salesLog || []).length})
+                    Student WhatsApp & Key Security Audit Trail
                   </h3>
-                  <div className="mt-3 divide-y divide-white/10">
-                    {(db.salesLog || []).map((sale) => (
-                      <div
-                        key={sale.id}
-                        className="flex flex-wrap items-center justify-between gap-2 py-3 text-xs"
-                      >
-                        <div>
-                          <p className="font-bold">
-                            {sale.studentName} · {sale.mobile}
-                          </p>
-                          <p className="font-mono text-slate-400">
-                            Device: {sale.deviceId} · Key: {sale.proKey || sale.generatedProKey} · UTR:{' '}
-                            {sale.utrNumber}
-                          </p>
-                        </div>
-                        <span className="font-bold text-emerald-400 tabular-nums">
-                          ₹{sale.amountPaid}
-                        </span>
-                      </div>
-                    ))}
+                  <p className="text-xs text-slate-400">
+                    Immutable record of every Admin WhatsApp number update (old number, new number, timestamp, and acting admin).
+                  </p>
+                  <div className="mt-3 divide-y divide-white/10 max-h-60 overflow-y-auto">
+                    {(db.adminAuditLogs || []).filter(
+                      (a) =>
+                        a.action === 'student_whatsapp_update' ||
+                        a.action === 'student_whatsapp_updated' ||
+                        a.action === 'UPDATE_STUDENT_WHATSAPP'
+                    ).length === 0 ? (
+                      <p className="py-4 text-xs text-slate-400">
+                        No WhatsApp number edits recorded yet.
+                      </p>
+                    ) : (
+                      (db.adminAuditLogs || [])
+                        .filter(
+                          (a) =>
+                            a.action === 'student_whatsapp_update' ||
+                            a.action === 'student_whatsapp_updated' ||
+                            a.action === 'UPDATE_STUDENT_WHATSAPP'
+                        )
+                        .map((entry) => (
+                          <div key={entry.id} className="py-2.5 text-xs space-y-0.5">
+                            <div className="flex flex-wrap items-center justify-between gap-2">
+                              <span className="font-bold text-slate-200">
+                                {entry.targetStudentName || entry.studentName || 'Student'} (
+                                {entry.targetDeviceId})
+                              </span>
+                              <span className="text-[11px] text-slate-400 tabular-nums">
+                                {new Date(entry.timestamp).toLocaleString('en-IN')} · Admin:{' '}
+                                <strong className="text-indigo-300">{entry.actorAdminId}</strong>
+                              </span>
+                            </div>
+                            <p className="font-mono text-[11px] text-slate-300">
+                              Old: <span className="text-rose-300">{entry.oldValue}</span> → New:{' '}
+                              <span className="text-emerald-300">{entry.newValue}</span> (
+                              {entry.updateScope || 'both'})
+                            </p>
+                          </div>
+                        ))
+                    )}
                   </div>
                 </div>
               </div>
@@ -4708,68 +5414,258 @@ export const AdminControlCenter: React.FC<AdminControlCenterProps> = ({
             {activeSection === 'sync' && (
               <div className="space-y-6">
                 <div>
-                  <h2 className="text-lg font-bold">GitHub Cloud Sync & Admin Security</h2>
+                  <h2 className="text-lg font-bold">
+                    Admin Account Security (Email OTP Verified) & GitHub Cloud Sync
+                  </h2>
                   <p className="text-xs text-slate-400">
-                    Push or pull the Zyvra Master Database (`database.json`) via GitHub REST API, and manage your local Admin Passcode.
+                    Change your Admin Login ID / Username and Password with current-password + private Email OTP verification, review security audit logs, and synchronize `database.json` with GitHub.
                   </p>
                 </div>
 
-                {/* Admin Credentials Configuration */}
+                {/* Secure Admin User ID & Password Management with Private Email OTP Verification */}
                 <div
-                  className={`rounded-2xl p-5 ${
+                  className={`rounded-2xl p-5 space-y-4 ${
                     isDark ? 'surface-card-dark' : 'surface-card-light'
                   }`}
                 >
-                  <h3 className="text-sm font-bold">
-                    Update Local Owner Admin Credentials
-                  </h3>
-                  <p className="mt-1 text-xs text-slate-400">
-                    Update your salted SHA-256 Admin Login ID and Passcode stored on this browser. For production multi-user security, deploy `server.ts` and configure `VITE_API_BASE_URL`.
-                  </p>
-                  <div className="mt-3 grid grid-cols-1 gap-2.5 sm:grid-cols-3 max-w-2xl">
-                    <input
-                      type="text"
-                      value={newAdminLoginId}
-                      onChange={(e) => setNewAdminLoginId(e.target.value)}
-                      placeholder={`New Login ID (current: ${adminSession.loginId})`}
-                      className={`min-h-[42px] rounded-xl border px-3 text-xs outline-none ${
-                        isDark
-                          ? 'border-white/10 bg-white/5 text-white'
-                          : 'border-slate-200 bg-white text-slate-900'
-                      }`}
-                    />
-                    <input
-                      type="password"
-                      value={newAdminPasscode}
-                      onChange={(e) => setNewAdminPasscode(e.target.value)}
-                      placeholder="New Passcode (min 6 chars)"
-                      className={`min-h-[42px] rounded-xl border px-3 text-xs outline-none ${
-                        isDark
-                          ? 'border-white/10 bg-white/5 text-white'
-                          : 'border-slate-200 bg-white text-slate-900'
-                      }`}
-                    />
-                    <button
-                      type="button"
-                      onClick={async () => {
-                        const targetId = newAdminLoginId.trim() || adminSession.loginId;
-                        const res = await initializeOrUpdateLocalAdminCredentials(
-                          targetId,
-                          newAdminPasscode
-                        );
-                        if (!res.ok) {
-                          notify(res.error || 'Could not update credentials.', false);
-                          return;
-                        }
-                        setNewAdminLoginId('');
-                        setNewAdminPasscode('');
-                        notify('Updated salted SHA-256 Admin Login ID & Passcode.');
-                      }}
-                      className="min-h-[42px] rounded-xl bg-indigo-600 px-4 text-xs font-bold text-white hover:bg-indigo-500"
-                    >
-                      Save Credentials
-                    </button>
+                  <div className="flex flex-wrap items-center justify-between gap-2 border-b border-white/10 pb-3">
+                    <div>
+                      <span className="text-[11px] font-bold uppercase tracking-wider text-indigo-400">
+                        Two-Step Admin Credential Security (Current Password + Email OTP)
+                      </span>
+                      <h3 className="text-sm font-bold mt-0.5">
+                        Manage Admin Login ID & Password
+                      </h3>
+                    </div>
+                    <div className="rounded-xl border border-white/10 bg-white/[0.03] px-3 py-1.5 text-xs">
+                      Current Admin Login ID:{' '}
+                      <strong className="font-mono text-indigo-300">
+                        {adminSecInfo?.loginId || adminSession.loginId}
+                      </strong>
+                      {adminSecInfo?.sessionVersion ? (
+                        <span className="ml-2 text-[11px] text-slate-400">
+                          (Session v{adminSecInfo.sessionVersion})
+                        </span>
+                      ) : null}
+                    </div>
                   </div>
+
+                  <p className="text-xs text-slate-400 leading-relaxed">
+                    Every change to the Admin Login ID or Password requires verifying your <strong>current password</strong> followed by a <strong>6-digit one-time verification code (OTP)</strong> delivered to the server-configured private administrator security email. All prior admin sessions are automatically invalidated upon update.
+                  </p>
+
+                  {/* Action Type Selector */}
+                  <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+                    {(
+                      [
+                        { id: 'change_password', label: 'Change Admin Password' },
+                        { id: 'change_username', label: 'Change Admin Login ID' },
+                        { id: 'change_both', label: 'Change Both Login ID & Password' },
+                      ] as const
+                    ).map((opt) => (
+                      <button
+                        key={opt.id}
+                        type="button"
+                        onClick={() => {
+                          setSecActionType(opt.id);
+                          setSecOtpChallengeId(null);
+                          setSecOtpCode('');
+                          setSecFeedback(null);
+                        }}
+                        className={`min-h-[40px] rounded-xl border px-3 text-xs font-bold transition ${
+                          secActionType === opt.id
+                            ? 'border-indigo-500 bg-indigo-600 text-white'
+                            : isDark
+                            ? 'border-white/10 bg-white/[0.03] text-slate-300 hover:bg-white/10'
+                            : 'border-slate-200 bg-slate-50 text-slate-700'
+                        }`}
+                      >
+                        {opt.label}
+                      </button>
+                    ))}
+                  </div>
+
+                  {/* Step 1 Inputs: Current Password + New Username / New Password */}
+                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 max-w-3xl">
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-400 mb-1">
+                        Current Admin Password (Required)
+                      </label>
+                      <input
+                        type="password"
+                        value={secCurrentPassword}
+                        onChange={(e) => setSecCurrentPassword(e.target.value)}
+                        placeholder="Enter current Admin Password"
+                        autoComplete="current-password"
+                        className={`min-h-[42px] w-full rounded-xl border px-3 text-xs outline-none ${
+                          isDark
+                            ? 'border-white/10 bg-white/5 text-white'
+                            : 'border-slate-200 bg-white text-slate-900'
+                        }`}
+                      />
+                    </div>
+
+                    {(secActionType === 'change_username' || secActionType === 'change_both') && (
+                      <div>
+                        <label className="block text-xs font-semibold text-slate-400 mb-1">
+                          New Admin Login ID (4–32 chars, letters/digits/._-)
+                        </label>
+                        <input
+                          type="text"
+                          value={secNewLoginId}
+                          onChange={(e) => setSecNewLoginId(e.target.value)}
+                          placeholder={`New Login ID (current: ${adminSession.loginId})`}
+                          autoComplete="off"
+                          className={`min-h-[42px] w-full rounded-xl border px-3 text-xs outline-none ${
+                            isDark
+                              ? 'border-white/10 bg-white/5 text-white'
+                              : 'border-slate-200 bg-white text-slate-900'
+                          }`}
+                        />
+                      </div>
+                    )}
+
+                    {(secActionType === 'change_password' || secActionType === 'change_both') && (
+                      <>
+                        <div>
+                          <label className="block text-xs font-semibold text-slate-400 mb-1">
+                            New Admin Password (min 8 chars, upper + lower + digit/symbol)
+                          </label>
+                          <input
+                            type="password"
+                            value={secNewPassword}
+                            onChange={(e) => setSecNewPassword(e.target.value)}
+                            placeholder="Enter strong new password"
+                            autoComplete="new-password"
+                            className={`min-h-[42px] w-full rounded-xl border px-3 text-xs outline-none ${
+                              isDark
+                                ? 'border-white/10 bg-white/5 text-white'
+                                : 'border-slate-200 bg-white text-slate-900'
+                            }`}
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-xs font-semibold text-slate-400 mb-1">
+                            Confirm New Admin Password
+                          </label>
+                          <input
+                            type="password"
+                            value={secConfirmPassword}
+                            onChange={(e) => setSecConfirmPassword(e.target.value)}
+                            placeholder="Re-enter new password"
+                            autoComplete="new-password"
+                            className={`min-h-[42px] w-full rounded-xl border px-3 text-xs outline-none ${
+                              isDark
+                                ? 'border-white/10 bg-white/5 text-white'
+                                : 'border-slate-200 bg-white text-slate-900'
+                            }`}
+                          />
+                        </div>
+                      </>
+                    )}
+                  </div>
+
+                  {/* Step 1 Button or Step 2 OTP Entry */}
+                  {!secOtpChallengeId ? (
+                    <div className="flex flex-wrap items-center gap-3">
+                      <button
+                        type="button"
+                        disabled={secBusy}
+                        onClick={handleRequestAdminEmailOtp}
+                        className="inline-flex min-h-[42px] items-center gap-2 rounded-xl bg-indigo-600 px-4 text-xs font-bold text-white hover:bg-indigo-500 disabled:opacity-50"
+                      >
+                        <KeyRound className="h-3.5 w-3.5" />
+                        {secBusy ? 'Sending Verification OTP...' : 'Step 1: Send 6-Digit Email OTP'}
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="rounded-xl border border-indigo-500/40 bg-indigo-500/10 p-4 space-y-3 max-w-2xl">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <span className="text-xs font-bold text-indigo-300">
+                          Step 2: Enter 6-Digit Email OTP Verification Code
+                        </span>
+                        {secOtpExpiresAt && (
+                          <span className="text-[11px] text-slate-400">
+                            Expires at {new Date(secOtpExpiresAt).toLocaleTimeString('en-IN')}
+                          </span>
+                        )}
+                      </div>
+                      <div className="flex flex-wrap items-center gap-2.5">
+                        <input
+                          type="text"
+                          inputMode="numeric"
+                          maxLength={6}
+                          value={secOtpCode}
+                          onChange={(e) => setSecOtpCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                          placeholder="6-Digit OTP"
+                          className="min-h-[42px] w-44 rounded-xl border border-indigo-400/50 bg-slate-950 px-3.5 text-center font-mono text-base font-bold tracking-widest text-white outline-none"
+                        />
+                        <button
+                          type="button"
+                          disabled={secBusy}
+                          onClick={handleVerifyAdminEmailOtpAndSave}
+                          className="min-h-[42px] rounded-xl bg-emerald-600 px-4 text-xs font-bold text-white hover:bg-emerald-500 disabled:opacity-50"
+                        >
+                          {secBusy ? 'Verifying...' : 'Verify OTP & Update Credentials'}
+                        </button>
+                        <button
+                          type="button"
+                          disabled={secBusy}
+                          onClick={handleRequestAdminEmailOtp}
+                          className="min-h-[42px] rounded-xl border border-white/15 px-3 text-xs font-semibold text-slate-300 hover:bg-white/10"
+                        >
+                          Resend OTP
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setSecOtpChallengeId(null);
+                            setSecOtpCode('');
+                          }}
+                          className="min-h-[42px] rounded-xl border border-white/10 px-3 text-xs text-slate-400 hover:text-white"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {secFeedback && (
+                    <div
+                      className={`rounded-xl border px-3.5 py-2.5 text-xs font-semibold ${
+                        secFeedback.ok
+                          ? 'border-emerald-500/40 bg-emerald-500/15 text-emerald-300'
+                          : 'border-rose-500/40 bg-rose-500/15 text-rose-300'
+                      }`}
+                    >
+                      {secFeedback.text}
+                    </div>
+                  )}
+
+                  {/* Admin Security Audit Trail */}
+                  {adminSecInfo && adminSecInfo.auditLogs.length > 0 && (
+                    <div className="pt-3 border-t border-white/10">
+                      <h4 className="text-xs font-bold uppercase tracking-wider text-slate-400">
+                        Recent Admin Account & Security Audit Events
+                      </h4>
+                      <div className="mt-2 divide-y divide-white/10 max-h-48 overflow-y-auto">
+                        {adminSecInfo.auditLogs.slice(0, 12).map((log) => (
+                          <div
+                            key={log.id}
+                            className="flex flex-wrap items-center justify-between gap-2 py-2 text-xs"
+                          >
+                            <div>
+                              <span className="font-semibold text-slate-200">{log.action}</span>:{' '}
+                              <span className="text-slate-400">{log.summary || log.details}</span>
+                            </div>
+                            <span className="text-[11px] text-slate-400 tabular-nums">
+                              {new Date(log.timestamp).toLocaleString('en-IN')} · {log.actorAdminId}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                 </div>
 
                 {/* GitHub Repository Sync */}

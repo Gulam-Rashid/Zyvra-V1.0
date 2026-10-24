@@ -1,7 +1,9 @@
 import express, { Request, Response, NextFunction } from 'express';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import net from 'node:net';
 import path from 'node:path';
+import tls from 'node:tls';
 import { createServer as createViteServer } from 'vite';
 import { GoogleGenAI, Type } from '@google/genai';
 
@@ -9,12 +11,58 @@ const PORT = Number(process.env.PORT || 3000);
 const DATA_DIR = path.resolve(process.cwd(), 'data');
 const STORE_PATH = path.join(DATA_DIR, 'zyvra-cloud-store.json');
 
+// Private Admin Security Email — strictly server-side only; never exposed in client responses
+const ADMIN_SECURITY_EMAIL = (
+  process.env.ADMIN_SECURITY_EMAIL || 'gulamrashid170@gmail.com'
+).trim();
+
+const SERVER_MASTER_SECRET_SALT = 'SSC_PRO_TCS_MASTER_SALT_2026_V9';
+
+export interface AdminOtpChallengeRecord {
+  challengeId: string;
+  adminId: string;
+  actionType: 'change_username' | 'change_password' | 'change_both';
+  otpHash: string; // salt:scryptHex of challengeId::actionType::otp
+  pendingLoginId?: string;
+  pendingPasswordHash?: string;
+  createdAt: number;
+  expiresAt: number;
+  lastSentAt: number;
+  attempts: number;
+  maxAttempts: number;
+  used: boolean;
+}
+
+export interface StudentDeviceBindingRecord {
+  deviceId: string;
+  deviceSecretHash: string;
+  sessionVersion: number;
+  boundAt: number;
+  lastSeenAt: number;
+}
+
+export interface ActivatedKeyRecord {
+  proKey: string;
+  deviceId: string;
+  studentName: string;
+  whatsappNumber: string;
+  whatsappVerified: boolean;
+  activatedAt: number;
+  expiresAt: number | null;
+  revoked: boolean;
+}
+
 interface CloudStore {
   adminConfig: {
     loginId: string;
     passwordHash: string; // salt:scryptHex
+    sessionVersion?: number;
     updatedAt: number;
   } | null;
+  adminOtpChallenge?: AdminOtpChallengeRecord | null;
+  adminAuditLogs?: Array<Record<string, any>>;
+  studentDeviceBindings?: Record<string, StudentDeviceBindingRecord>;
+  activatedKeys?: Record<string, ActivatedKeyRecord>;
   masterDb: Record<string, any> | null;
   studentStates: Record<string, Record<string, any>>;
   processedIdempotencyKeys: Record<string, number>;
@@ -36,9 +84,14 @@ const DEFAULT_STORE: CloudStore = {
       ? {
           loginId: process.env.ADMIN_LOGIN_ID,
           passwordHash: process.env.ADMIN_PASSWORD_HASH,
+          sessionVersion: 1,
           updatedAt: Date.now(),
         }
       : null,
+  adminOtpChallenge: null,
+  adminAuditLogs: [],
+  studentDeviceBindings: {},
+  activatedKeys: {},
   masterDb: null,
   studentStates: {},
   processedIdempotencyKeys: {},
@@ -56,13 +109,45 @@ function loadCloudStore(): CloudStore {
     }
     const raw = fs.readFileSync(STORE_PATH, 'utf8');
     const parsed = JSON.parse(raw);
-    return {
+    const loaded: CloudStore = {
       ...structuredClone(DEFAULT_STORE),
       ...parsed,
+      adminOtpChallenge: parsed.adminOtpChallenge || null,
+      adminAuditLogs: Array.isArray(parsed.adminAuditLogs) ? parsed.adminAuditLogs : [],
+      studentDeviceBindings: parsed.studentDeviceBindings || {},
+      activatedKeys: parsed.activatedKeys || {},
       studentStates: parsed.studentStates || {},
       processedIdempotencyKeys: parsed.processedIdempotencyKeys || {},
       translationCache: parsed.translationCache || {},
     };
+    // Seed from ADMIN_LOGIN_ID / ADMIN_PASSWORD_HASH env vars if adminConfig is not yet in store
+    if (!loaded.adminConfig && process.env.ADMIN_LOGIN_ID && process.env.ADMIN_PASSWORD_HASH) {
+      loaded.adminConfig = {
+        loginId: process.env.ADMIN_LOGIN_ID.trim(),
+        passwordHash: process.env.ADMIN_PASSWORD_HASH.trim(),
+        sessionVersion: 1,
+        updatedAt: Date.now(),
+      };
+    }
+    // Migrate legacy plaintext adminConfig passwordHash to salted scrypt hash immediately
+    if (
+      loaded.adminConfig &&
+      loaded.adminConfig.passwordHash &&
+      !String(loaded.adminConfig.passwordHash).includes(':')
+    ) {
+      const salt = crypto.randomBytes(16).toString('hex');
+      const derived = crypto
+        .scryptSync(String(loaded.adminConfig.passwordHash), salt, 64)
+        .toString('hex');
+      loaded.adminConfig.passwordHash = `${salt}:${derived}`;
+      loaded.adminConfig.sessionVersion = loaded.adminConfig.sessionVersion || 1;
+      try {
+        fs.writeFileSync(STORE_PATH, JSON.stringify(loaded, null, 2), 'utf8');
+      } catch {
+        // ignore write error during migration
+      }
+    }
+    return loaded;
   } catch (err) {
     console.error('Failed to read cloud store, initializing fresh store:', err);
     return structuredClone(DEFAULT_STORE);
@@ -113,11 +198,26 @@ function constantTimeStringMatch(a: string, b: string): boolean {
   return crypto.timingSafeEqual(bufA, bufB);
 }
 
-function createSignedToken(loginId: string): string {
+function getActiveAdminCredentials(): {
+  loginId: string;
+  passwordHash: string;
+  sessionVersion: number;
+} {
+  const loginId = cloudStore.adminConfig?.loginId || process.env.ADMIN_LOGIN_ID || '';
+  const passwordHash =
+    cloudStore.adminConfig?.passwordHash || process.env.ADMIN_PASSWORD_HASH || '';
+  const sessionVersion = Number(cloudStore.adminConfig?.sessionVersion || 1);
+  return { loginId, passwordHash, sessionVersion };
+}
+
+function createSignedToken(loginId: string, sessionVersion?: number): string {
+  const active = getActiveAdminCredentials();
+  const sv = sessionVersion ?? active.sessionVersion;
   const payload = Buffer.from(
     JSON.stringify({
       sub: loginId,
       role: 'admin',
+      sv,
       iat: Date.now(),
       exp: Date.now() + 8 * 60 * 60 * 1000,
     })
@@ -129,7 +229,9 @@ function createSignedToken(loginId: string): string {
   return `${payload}.${sig}`;
 }
 
-function verifySignedToken(token: string): { sub: string; role: string; exp: number } | null {
+function verifySignedToken(
+  token: string
+): { sub: string; role: string; sv?: number; exp: number } | null {
   if (!token || typeof token !== 'string' || !token.includes('.')) return null;
   const [payload, sig] = token.split('.');
   if (!payload || !sig) return null;
@@ -141,6 +243,13 @@ function verifySignedToken(token: string): { sub: string; role: string; exp: num
   try {
     const parsed = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
     if (!parsed || parsed.role !== 'admin' || Date.now() > Number(parsed.exp)) {
+      return null;
+    }
+    const active = getActiveAdminCredentials();
+    if (active.loginId && parsed.sub !== active.loginId) {
+      return null;
+    }
+    if (parsed.sv !== undefined && Number(parsed.sv) !== active.sessionVersion) {
       return null;
     }
     return parsed;
@@ -182,6 +291,33 @@ function computeServerDeterministicHash(input: string): number {
   return Math.abs((h1 ^ h2) >>> 0);
 }
 
+function generateServerProKey(
+  deviceId: string,
+  secretMasterSalt: string = SERVER_MASTER_SECRET_SALT
+): string {
+  const normalizedDevice = String(deviceId || '').trim().toUpperCase();
+  if (
+    (!normalizedDevice.startsWith('ZYV-') &&
+      !normalizedDevice.startsWith('SSC-') &&
+      !normalizedDevice.startsWith('DEV-')) ||
+    normalizedDevice.length < 9
+  ) {
+    return '';
+  }
+  const canonicalDevice = normalizedDevice.replace(/^(ZYV-|DEV-)/, 'SSC-');
+  const raw = `${canonicalDevice}::${secretMasterSalt}::SSC_UNLOCK_2026`;
+  const h1 = computeServerDeterministicHash(raw);
+  const h2 = computeServerDeterministicHash(
+    raw.split('').reverse().join('') + secretMasterSalt
+  );
+  const fourDigits = String((h1 % 9000) + 1000);
+  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  const s1 = alphabet[h2 % alphabet.length];
+  const s2 = alphabet[(h1 >>> 6) % alphabet.length];
+  const s3 = alphabet[(h2 >>> 11) % alphabet.length];
+  return `PRO-${fourDigits}-${s1}${s2}${s3}`;
+}
+
 function generateServerReferralCode(deviceId: string): string {
   const clean = (deviceId || 'ZYV-1000-AAA').trim().toUpperCase();
   const h = computeServerDeterministicHash(`ZYVRA_REF_2026::${clean}`);
@@ -191,6 +327,429 @@ function generateServerReferralCode(deviceId: string): string {
   const c3 = alphabet[(h >>> 10) % alphabet.length];
   const digits = String((h % 900) + 100);
   return `ZYVREF-${digits}${c1}${c2}${c3}`;
+}
+
+function normalizeServerWhatsAppNumber(
+  rawInput: string,
+  defaultCountryCode: string = '91'
+): { valid: boolean; normalized: string; localMobile: string; error?: string } {
+  const trimmed = String(rawInput || '').trim();
+  if (!trimmed) {
+    return {
+      valid: false,
+      normalized: '',
+      localMobile: '',
+      error: 'WhatsApp number is required.',
+    };
+  }
+  if (!/^\+?[\d\s\-()]+$/.test(trimmed)) {
+    return {
+      valid: false,
+      normalized: '',
+      localMobile: '',
+      error: 'WhatsApp number may only contain digits, spaces, hyphens, and an optional leading +.',
+    };
+  }
+  const hasLeadingPlus = trimmed.startsWith('+');
+  const digitsOnly = trimmed.replace(/\D/g, '');
+  if (digitsOnly.length < 10 || digitsOnly.length > 15) {
+    return {
+      valid: false,
+      normalized: '',
+      localMobile: '',
+      error: 'WhatsApp number must contain between 10 and 15 digits.',
+    };
+  }
+  if (/^(\d)\1{9,}$/.test(digitsOnly)) {
+    return {
+      valid: false,
+      normalized: '',
+      localMobile: '',
+      error: 'Invalid phone number: repeated dummy digits are not allowed.',
+    };
+  }
+  if (digitsOnly.length === 10) {
+    if (defaultCountryCode === '91' && !/^[6-9]\d{9}$/.test(digitsOnly)) {
+      return {
+        valid: false,
+        normalized: '',
+        localMobile: '',
+        error: 'Indian 10-digit WhatsApp numbers must start with 6, 7, 8, or 9.',
+      };
+    }
+    return {
+      valid: true,
+      normalized: `+${defaultCountryCode}${digitsOnly}`,
+      localMobile: digitsOnly,
+    };
+  }
+  if (!hasLeadingPlus && digitsOnly.length === 11 && digitsOnly.startsWith('0')) {
+    const tenDigits = digitsOnly.slice(1);
+    if (!/^[6-9]\d{9}$/.test(tenDigits)) {
+      return {
+        valid: false,
+        normalized: '',
+        localMobile: '',
+        error: 'Indian 10-digit WhatsApp numbers must start with 6, 7, 8, or 9.',
+      };
+    }
+    return {
+      valid: true,
+      normalized: `+${defaultCountryCode}${tenDigits}`,
+      localMobile: tenDigits,
+    };
+  }
+  if (digitsOnly.length === 12 && digitsOnly.startsWith('91')) {
+    const tenDigits = digitsOnly.slice(2);
+    if (!/^[6-9]\d{9}$/.test(tenDigits)) {
+      return {
+        valid: false,
+        normalized: '',
+        localMobile: '',
+        error: 'Indian (+91) WhatsApp numbers must have a 10-digit subscriber number starting with 6–9.',
+      };
+    }
+    return {
+      valid: true,
+      normalized: `+91${tenDigits}`,
+      localMobile: tenDigits,
+    };
+  }
+  if (/^[1-9]\d{10,14}$/.test(digitsOnly)) {
+    return {
+      valid: true,
+      normalized: `+${digitsOnly}`,
+      localMobile: digitsOnly.slice(-10),
+    };
+  }
+  return {
+    valid: false,
+    normalized: '',
+    localMobile: '',
+    error: 'Invalid WhatsApp phone number format.',
+  };
+}
+
+function createStudentSessionToken(deviceId: string, sessionVersion: number): string {
+  const payload = Buffer.from(
+    JSON.stringify({
+      sub: deviceId,
+      role: 'student_device',
+      sv: sessionVersion,
+      iat: Date.now(),
+      exp: Date.now() + 30 * 24 * 60 * 60 * 1000,
+    })
+  ).toString('base64url');
+  const sig = crypto
+    .createHmac('sha256', SESSION_SECRET)
+    .update(`STUDENT::${payload}`)
+    .digest('base64url');
+  return `${payload}.${sig}`;
+}
+
+function verifyStudentSessionToken(
+  token: string,
+  expectedDeviceId: string,
+  expectedSessionVersion: number
+): boolean {
+  if (!token || typeof token !== 'string' || !token.includes('.')) return false;
+  const [payload, sig] = token.split('.');
+  if (!payload || !sig) return false;
+  const expectedSig = crypto
+    .createHmac('sha256', SESSION_SECRET)
+    .update(`STUDENT::${payload}`)
+    .digest('base64url');
+  if (!constantTimeStringMatch(sig, expectedSig)) return false;
+  try {
+    const parsed = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
+    if (
+      !parsed ||
+      parsed.role !== 'student_device' ||
+      parsed.sub !== expectedDeviceId ||
+      Number(parsed.sv) !== expectedSessionVersion ||
+      Date.now() > Number(parsed.exp)
+    ) {
+      return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function verifyOrBindStudentDevice(
+  deviceId: string,
+  deviceSecret?: string,
+  studentToken?: string
+): { ok: boolean; sessionToken?: string; error?: string } {
+  const cleanDeviceId = String(deviceId || '').trim().toUpperCase();
+  if (!cleanDeviceId) {
+    return { ok: false, error: 'deviceId is required.' };
+  }
+  cloudStore.studentDeviceBindings = cloudStore.studentDeviceBindings || {};
+  const existing = cloudStore.studentDeviceBindings[cleanDeviceId];
+  const cleanSecret = String(deviceSecret || '').trim();
+  const cleanToken = String(studentToken || '').trim();
+
+  if (!existing) {
+    if (cleanSecret && cleanSecret.length >= 12) {
+      const record: StudentDeviceBindingRecord = {
+        deviceId: cleanDeviceId,
+        deviceSecretHash: createScryptHash(cleanSecret),
+        sessionVersion: 1,
+        boundAt: Date.now(),
+        lastSeenAt: Date.now(),
+      };
+      cloudStore.studentDeviceBindings[cleanDeviceId] = record;
+      saveCloudStore();
+      return {
+        ok: true,
+        sessionToken: createStudentSessionToken(cleanDeviceId, 1),
+      };
+    }
+    // Unbound legacy call without deviceSecret: allow until bound
+    return { ok: true };
+  }
+
+  // Device is already bound to a specific installation secret!
+  if (cleanToken && verifyStudentSessionToken(cleanToken, cleanDeviceId, existing.sessionVersion)) {
+    existing.lastSeenAt = Date.now();
+    return {
+      ok: true,
+      sessionToken: cleanToken,
+    };
+  }
+
+  if (cleanSecret && verifyScryptPassword(cleanSecret, existing.deviceSecretHash)) {
+    existing.lastSeenAt = Date.now();
+    return {
+      ok: true,
+      sessionToken: createStudentSessionToken(cleanDeviceId, existing.sessionVersion),
+    };
+  }
+
+  return {
+    ok: false,
+    error:
+      'Device security mismatch: This Device ID is bound to another device installation and cannot be accessed without its device key.',
+  };
+}
+
+function recordAdminSecurityAudit(entry: {
+  action: string;
+  actorAdminId: string;
+  targetDeviceId?: string;
+  targetSaleId?: string;
+  targetStudentName?: string;
+  updateScope?: 'sale_only' | 'profile_only' | 'both';
+  oldValue?: string;
+  newValue?: string;
+  whatsappVerified?: boolean;
+  summary: string;
+}): Record<string, any> {
+  const auditItem = {
+    id: `AUD-${Date.now()}-${crypto.randomBytes(2).toString('hex')}`,
+    timestamp: new Date().toISOString(),
+    ...entry,
+  };
+  cloudStore.adminAuditLogs = Array.isArray(cloudStore.adminAuditLogs)
+    ? cloudStore.adminAuditLogs
+    : [];
+  cloudStore.adminAuditLogs.unshift(auditItem);
+  cloudStore.adminAuditLogs = cloudStore.adminAuditLogs.slice(0, 200);
+  if (cloudStore.masterDb) {
+    cloudStore.masterDb.adminAuditLogs = cloudStore.adminAuditLogs;
+  }
+  return auditItem;
+}
+
+function isEmailDeliveryConfigured(): boolean {
+  return Boolean(process.env.RESEND_API_KEY || process.env.SMTP_HOST);
+}
+
+/**
+ * Sends a 6-digit OTP email to the private Admin Security Email (`ADMIN_SECURITY_EMAIL`)
+ * using the configured Resend HTTP API (`RESEND_API_KEY`) or RFC-5321 SMTP (`SMTP_HOST`).
+ * Never logs or returns the OTP code.
+ */
+async function sendPrivateAdminOtpEmail(
+  recipientEmail: string,
+  otpCode: string,
+  actionType: string,
+  adminLoginId: string
+): Promise<{ sent: boolean; provider?: string; error?: string }> {
+  const actionLabel =
+    actionType === 'change_username'
+      ? 'Admin Login ID Change'
+      : actionType === 'change_password'
+      ? 'Admin Passcode Change'
+      : 'Admin Login ID & Passcode Change';
+
+  const rawFrom = (process.env.SMTP_FROM || '').trim();
+  const fromHeader =
+    rawFrom && rawFrom.includes('@')
+      ? rawFrom
+      : 'Zyvra <onboarding@resend.dev>';
+  const envelopeFrom = (fromHeader.match(/<([^>]+)>/)?.[1] || fromHeader).trim();
+
+  const subject = `Zyvra Admin Security Verification Code — ${actionLabel}`;
+  const textBody = [
+    `Zyvra Administrator Security Verification`,
+    `=========================================`,
+    `Action Requested: ${actionLabel}`,
+    `Current Admin ID: ${adminLoginId}`,
+    `One-Time Verification Code (OTP): ${otpCode}`,
+    `Validity: 5 minutes (single use only)`,
+    ``,
+    `If you did not initiate this request inside the Zyvra Admin Control Center, ignore this email and rotate your credentials immediately.`,
+  ].join('\r\n');
+
+  // Primary Provider: Resend HTTP API (`RESEND_API_KEY`)
+  const resendApiKey = (process.env.RESEND_API_KEY || '').trim();
+  if (resendApiKey) {
+    try {
+      const res = await fetch('https://api.resend.com/emails', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${resendApiKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          from: fromHeader,
+          to: [recipientEmail],
+          subject,
+          text: textBody,
+        }),
+      });
+      if (!res.ok) {
+        const errBody = (await res.json().catch(() => ({}))) as { message?: string; name?: string };
+        return {
+          sent: false,
+          error: errBody?.message
+            ? `Resend API error (${res.status}): ${errBody.message}`
+            : `Resend API returned HTTP ${res.status}.`,
+        };
+      }
+      return { sent: true, provider: 'resend' };
+    } catch (err) {
+      return {
+        sent: false,
+        error: `Resend delivery error: ${err instanceof Error ? err.message : 'Network error'}`,
+      };
+    }
+  }
+
+  // Fallback Provider: RFC-5321 SMTP over TLS (port 465) or TCP (port 587 / local relay 2525)
+  const explicitSmtpHost = (process.env.SMTP_HOST || '').trim();
+  const smtpHost = explicitSmtpHost || '127.0.0.1';
+  const smtpPort = Number(process.env.SMTP_PORT || (explicitSmtpHost ? 465 : 2525));
+  const smtpUser = (process.env.SMTP_USER || '').trim();
+  const smtpPass = process.env.SMTP_PASS || '';
+  const useImplicitTls =
+    process.env.SMTP_SECURE === 'true' ||
+    (process.env.SMTP_SECURE !== 'false' && smtpPort === 465);
+
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (result: { sent: boolean; provider?: string; error?: string }) => {
+      if (!settled) {
+        settled = true;
+        resolve(result);
+      }
+    };
+
+    const socket: net.Socket | tls.TLSSocket = useImplicitTls
+      ? tls.connect({ host: smtpHost, port: smtpPort, rejectUnauthorized: false })
+      : net.createConnection({ host: smtpHost, port: smtpPort });
+
+    socket.setTimeout(explicitSmtpHost ? 10000 : 2000);
+    let step = 0;
+    let buffer = '';
+
+    const sendLine = (line: string) => {
+      socket.write(`${line}\r\n`);
+    };
+
+    const handleSmtpResponse = (code: number, fullText: string) => {
+      if (code >= 400) {
+        try {
+          socket.end();
+        } catch {
+          // ignore
+        }
+        finish({ sent: false, error: `SMTP error (${code}): ${fullText.trim()}` });
+        return;
+      }
+
+      if (step === 0 && code === 220) {
+        step = 1;
+        sendLine('EHLO zyvra.local');
+      } else if (step === 1 && code === 250) {
+        if (smtpUser && smtpPass) {
+          step = 2;
+          const authToken = Buffer.from(`\0${smtpUser}\0${smtpPass}`, 'utf8').toString('base64');
+          sendLine(`AUTH PLAIN ${authToken}`);
+        } else {
+          step = 3;
+          sendLine(`MAIL FROM:<${envelopeFrom}>`);
+        }
+      } else if (step === 2 && (code === 235 || code === 250)) {
+        step = 3;
+        sendLine(`MAIL FROM:<${envelopeFrom}>`);
+      } else if (step === 3 && code === 250) {
+        step = 4;
+        sendLine(`RCPT TO:<${recipientEmail}>`);
+      } else if (step === 4 && (code === 250 || code === 251)) {
+        step = 5;
+        sendLine('DATA');
+      } else if (step === 5 && code === 354) {
+        step = 6;
+        const rawEmail = [
+          `From: ${fromHeader.includes('<') ? fromHeader : `Zyvra Security <${envelopeFrom}>`}`,
+          `To: <${recipientEmail}>`,
+          `Subject: ${subject}`,
+          `Date: ${new Date().toUTCString()}`,
+          `Content-Type: text/plain; charset=utf-8`,
+          ``,
+          textBody,
+          `.`,
+        ].join('\r\n');
+        sendLine(rawEmail);
+      } else if (step === 6 && code === 250) {
+        step = 7;
+        sendLine('QUIT');
+        socket.end();
+        finish({ sent: true, provider: 'smtp' });
+      }
+    };
+
+    socket.on('data', (chunk: Buffer) => {
+      buffer += chunk.toString('utf8');
+      const lines = buffer.split(/\r?\n/);
+      buffer = lines.pop() || '';
+      for (const line of lines) {
+        if (!line) continue;
+        if (/^\d{3}\s/.test(line)) {
+          const code = Number(line.slice(0, 3));
+          handleSmtpResponse(code, line);
+        }
+      }
+    });
+
+    socket.on('timeout', () => {
+      socket.destroy();
+      finish({ sent: false, error: 'SMTP connection timed out.' });
+    });
+
+    socket.on('error', (err) => {
+      finish({
+        sent: false,
+        error: explicitSmtpHost
+          ? `SMTP connection failed: ${err.message}`
+          : 'Email delivery provider is not configured on the server. Set RESEND_API_KEY (recommended) or SMTP_HOST in server environment variables.',
+      });
+    });
+  });
 }
 
 function ensureMasterDbArrays(): Record<string, any> {
@@ -210,6 +769,7 @@ function ensureMasterDbArrays(): Record<string, any> {
       coupons: [],
       salesHistory: [],
       salesLog: [],
+      adminAuditLogs: cloudStore.adminAuditLogs || [],
       referralPolicy: {
         enabled: true,
         commissionType: 'percent',
@@ -248,6 +808,12 @@ function ensureMasterDbArrays(): Record<string, any> {
     : [];
   cloudStore.masterDb.testSeries = Array.isArray(cloudStore.masterDb.testSeries)
     ? cloudStore.masterDb.testSeries
+    : [];
+  cloudStore.masterDb.salesLog = Array.isArray(cloudStore.masterDb.salesLog)
+    ? cloudStore.masterDb.salesLog
+    : [];
+  cloudStore.masterDb.adminAuditLogs = Array.isArray(cloudStore.adminAuditLogs)
+    ? cloudStore.adminAuditLogs
     : [];
   return cloudStore.masterDb;
 }
@@ -335,7 +901,10 @@ async function startServer() {
     const origin = req.headers.origin || '*';
     res.setHeader('Access-Control-Allow-Origin', origin);
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    res.setHeader(
+      'Access-Control-Allow-Headers',
+      'Content-Type, Authorization, X-Zyvra-Device-Secret, X-Zyvra-Student-Token'
+    );
     res.setHeader('Access-Control-Allow-Credentials', 'true');
     if (req.method === 'OPTIONS') {
       res.status(204).end();
@@ -344,27 +913,22 @@ async function startServer() {
     next();
   });
 
-  // 1. Health & Admin Auth Status
+  // 1. Health & Admin Auth Status (Never exposes private admin email or secrets)
   app.get('/api/health', (_req: Request, res: Response) => {
-    const envConfigured = Boolean(process.env.ADMIN_LOGIN_ID && process.env.ADMIN_PASSWORD_HASH);
-    const storeConfigured = Boolean(
-      cloudStore.adminConfig?.loginId && cloudStore.adminConfig?.passwordHash
-    );
+    const active = getActiveAdminCredentials();
     res.json({
       ok: true,
       service: 'zyvra-unified-backend',
-      configured: envConfigured || storeConfigured,
+      configured: Boolean(active.loginId && active.passwordHash),
+      emailOtpConfigured: isEmailDeliveryConfigured(),
       timestamp: Date.now(),
     });
   });
 
   // First-time Admin Setup on backend (when not already configured)
   app.post('/api/admin/setup', (req: Request, res: Response) => {
-    const envConfigured = Boolean(process.env.ADMIN_LOGIN_ID && process.env.ADMIN_PASSWORD_HASH);
-    const storeConfigured = Boolean(
-      cloudStore.adminConfig?.loginId && cloudStore.adminConfig?.passwordHash
-    );
-    if (envConfigured || storeConfigured) {
+    const active = getActiveAdminCredentials();
+    if (active.loginId && active.passwordHash) {
       res.status(409).json({
         ok: false,
         error: 'Admin credentials are already configured on this server. Please sign in.',
@@ -387,11 +951,12 @@ async function startServer() {
     cloudStore.adminConfig = {
       loginId: cleanId,
       passwordHash: createScryptHash(cleanPass),
+      sessionVersion: 1,
       updatedAt: Date.now(),
     };
     saveCloudStore();
 
-    const token = createSignedToken(cleanId);
+    const token = createSignedToken(cleanId, 1);
     res.setHeader(
       'Set-Cookie',
       `zyvra_admin_token=${token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=28800`
@@ -399,7 +964,7 @@ async function startServer() {
     res.json({ ok: true, token, loginId: cleanId, role: 'admin' });
   });
 
-  // Admin Login (supports mobile & web)
+  // Admin Login (supports mobile & web; respects updated cloudStore.adminConfig credentials)
   app.post('/api/admin/login', (req: Request, res: Response) => {
     const clientIp =
       (req.headers['x-forwarded-for'] || '').toString().split(',')[0].trim() ||
@@ -416,25 +981,23 @@ async function startServer() {
       return;
     }
 
-    const activeLoginId =
-      process.env.ADMIN_LOGIN_ID || cloudStore.adminConfig?.loginId || '';
-    const activePassHash =
-      process.env.ADMIN_PASSWORD_HASH || cloudStore.adminConfig?.passwordHash || '';
+    const { loginId: activeLoginId, passwordHash: activePassHash, sessionVersion } =
+      getActiveAdminCredentials();
 
     const { loginId = '', password = '', autoProvisionIfUnconfigured = false } = req.body || {};
     const cleanId = String(loginId).trim();
     const cleanPass = String(password);
 
-    // If server has no admin credentials yet and client sends valid initial credentials (e.g. from mobile setup)
     if (!activeLoginId || !activePassHash) {
       if (autoProvisionIfUnconfigured && cleanId.length >= 4 && cleanPass.length >= 6) {
         cloudStore.adminConfig = {
           loginId: cleanId,
           passwordHash: createScryptHash(cleanPass),
+          sessionVersion: 1,
           updatedAt: Date.now(),
         };
         saveCloudStore();
-        const token = createSignedToken(cleanId);
+        const token = createSignedToken(cleanId, 1);
         res.setHeader(
           'Set-Cookie',
           `zyvra_admin_token=${token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=28800`
@@ -445,7 +1008,8 @@ async function startServer() {
       res.status(503).json({
         ok: false,
         needsSetup: true,
-        error: 'Administrator credentials are not configured yet. Please complete first-time owner setup.',
+        error:
+          'Administrator credentials are not configured yet. Please complete first-time owner setup.',
       });
       return;
     }
@@ -467,12 +1031,12 @@ async function startServer() {
     }
 
     rateLimitMap.delete(clientIp);
-    const token = createSignedToken(activeLoginId);
+    const token = createSignedToken(activeLoginId, sessionVersion);
     res.setHeader(
       'Set-Cookie',
       `zyvra_admin_token=${token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=28800`
     );
-    res.json({ ok: true, token, loginId: activeLoginId, role: 'admin' });
+    res.json({ ok: true, token, loginId: activeLoginId, sessionVersion, role: 'admin' });
   });
 
   app.get('/api/admin/session', (req: Request, res: Response) => {
@@ -486,6 +1050,7 @@ async function startServer() {
       ok: true,
       loginId: verified.sub,
       role: verified.role,
+      sessionVersion: verified.sv || 1,
       expiresAt: verified.exp,
     });
   });
@@ -498,23 +1063,972 @@ async function startServer() {
     res.json({ ok: true });
   });
 
-  // 2. Real Cloud Sync Endpoints (Phase 3)
+  // ==========================================================================
+  // 1B. ADMIN ACCOUNT & SECURITY SETTINGS (PRIVATE EMAIL OTP VERIFICATION)
+  // Private destination email is strictly server-side (`ADMIN_SECURITY_EMAIL`)
+  // and is NEVER exposed in any API response.
+  // ==========================================================================
+  app.get('/api/admin/account/info', requireAdminAuth, (_req: Request, res: Response) => {
+    const active = getActiveAdminCredentials();
+    const challenge = cloudStore.adminOtpChallenge;
+    const hasActiveChallenge = Boolean(
+      challenge &&
+        !challenge.used &&
+        Date.now() < challenge.expiresAt &&
+        challenge.attempts < challenge.maxAttempts
+    );
+    res.json({
+      ok: true,
+      loginId: active.loginId,
+      sessionVersion: active.sessionVersion,
+      updatedAt: cloudStore.adminConfig?.updatedAt || null,
+      otpProtected: true,
+      emailDeliveryConfigured: isEmailDeliveryConfigured(),
+      activeChallenge: hasActiveChallenge
+        ? {
+            actionType: challenge!.actionType,
+            expiresAt: challenge!.expiresAt,
+            remainingAttempts: Math.max(0, challenge!.maxAttempts - challenge!.attempts),
+          }
+        : null,
+      auditLogs: (cloudStore.adminAuditLogs || []).slice(0, 50),
+    });
+  });
+
+  app.post('/api/admin/account/request-otp', requireAdminAuth, async (req: Request, res: Response) => {
+    const adminUser = (req as any).adminUser;
+    const active = getActiveAdminCredentials();
+
+    const {
+      actionType = 'change_password',
+      currentPassword = '',
+      newLoginId = '',
+      newPassword = '',
+      confirmNewPassword,
+    } = req.body || {};
+
+    if (!['change_username', 'change_password', 'change_both'].includes(actionType)) {
+      res.status(400).json({
+        ok: false,
+        error: 'Invalid actionType. Expected change_username, change_password, or change_both.',
+      });
+      return;
+    }
+
+    // 1. Verify current password first
+    if (!currentPassword || !verifyScryptPassword(String(currentPassword), active.passwordHash)) {
+      res.status(401).json({
+        ok: false,
+        error: 'Current administrator password is incorrect.',
+      });
+      return;
+    }
+
+    // 2. Validate requested username / password changes before generating OTP
+    let validatedNewLoginId = active.loginId;
+    if (actionType === 'change_username' || actionType === 'change_both') {
+      const cleanNewId = String(newLoginId || '').trim();
+      if (!/^[a-zA-Z0-9_.@-]{4,40}$/.test(cleanNewId)) {
+        res.status(400).json({
+          ok: false,
+          error:
+            'New Admin Login ID must be 4–40 characters and contain only letters, numbers, @, underscores, dots, or hyphens.',
+        });
+        return;
+      }
+      if (actionType === 'change_username' && cleanNewId === active.loginId) {
+        res.status(400).json({
+          ok: false,
+          error: 'New Admin Login ID must be different from your current Login ID.',
+        });
+        return;
+      }
+      validatedNewLoginId = cleanNewId;
+    }
+
+    let pendingPasswordHash: string | undefined;
+    if (actionType === 'change_password' || actionType === 'change_both') {
+      const rawNewPass = String(newPassword || '');
+      const rawConfirmPass =
+        confirmNewPassword !== undefined ? String(confirmNewPassword) : rawNewPass;
+      if (rawNewPass.length < 8) {
+        res.status(400).json({
+          ok: false,
+          error: 'New password must be at least 8 characters long.',
+        });
+        return;
+      }
+      if (!/[A-Za-z]/.test(rawNewPass) || !/[0-9!@#$%^&*()_+\-=]/.test(rawNewPass)) {
+        res.status(400).json({
+          ok: false,
+          error: 'New password must include at least one letter and one number or symbol.',
+        });
+        return;
+      }
+      if (rawNewPass !== rawConfirmPass) {
+        res.status(400).json({
+          ok: false,
+          error: 'New password and password confirmation do not match.',
+        });
+        return;
+      }
+      if (verifyScryptPassword(rawNewPass, active.passwordHash)) {
+        res.status(400).json({
+          ok: false,
+          error: 'New password must be different from your current password.',
+        });
+        return;
+      }
+      pendingPasswordHash = createScryptHash(rawNewPass);
+    }
+
+    // 3. Enforce OTP resend cooldown rate-limit
+    const cooldownMs = Number(process.env.ADMIN_OTP_COOLDOWN_MS ?? 15000);
+    const existingChallenge = cloudStore.adminOtpChallenge;
+    if (
+      existingChallenge &&
+      !existingChallenge.used &&
+      Date.now() - existingChallenge.lastSentAt < cooldownMs
+    ) {
+      const waitSec = Math.ceil(
+        (cooldownMs - (Date.now() - existingChallenge.lastSentAt)) / 1000
+      );
+      res.status(429).json({
+        ok: false,
+        error: `Please wait ${waitSec}s before requesting another verification OTP.`,
+      });
+      return;
+    }
+
+    // 4. Generate cryptographically secure 6-digit OTP & bind scrypt hash to challenge + actionType
+    const otpCode = crypto.randomInt(100000, 1000000).toString();
+    const challengeId = `OTP-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
+    const otpHash = createScryptHash(`${challengeId}::${actionType}::${otpCode}`);
+    const now = Date.now();
+    const expiresAt = now + 5 * 60 * 1000; // 5 minutes validity
+
+    // 5. Deliver OTP to private server-configured Admin Security Email
+    const delivery = await sendPrivateAdminOtpEmail(
+      ADMIN_SECURITY_EMAIL,
+      otpCode,
+      actionType,
+      adminUser?.sub || active.loginId
+    );
+
+    if (!delivery.sent) {
+      res.status(503).json({
+        ok: false,
+        emailDeliveryConfigured: isEmailDeliveryConfigured(),
+        error:
+          delivery.error ||
+          'Unable to send verification OTP email. Configure SMTP_HOST / SMTP_PASS or RESEND_API_KEY on the server.',
+      });
+      return;
+    }
+
+    cloudStore.adminOtpChallenge = {
+      challengeId,
+      adminId: active.loginId,
+      actionType,
+      otpHash,
+      pendingLoginId: validatedNewLoginId,
+      pendingPasswordHash,
+      createdAt: now,
+      expiresAt,
+      lastSentAt: now,
+      attempts: 0,
+      maxAttempts: 5,
+      used: false,
+    };
+    saveCloudStore();
+
+    res.json({
+      ok: true,
+      challengeId,
+      actionType,
+      expiresAt,
+      validitySeconds: 300,
+      message:
+        'A 6-digit verification code has been sent to the configured administrator security email. It expires in 5 minutes.',
+    });
+  });
+
+  app.post('/api/admin/account/verify-and-update', requireAdminAuth, (req: Request, res: Response) => {
+    const active = getActiveAdminCredentials();
+    const { otpCode = '', actionType = '' } = req.body || {};
+    const cleanOtp = String(otpCode || '').trim();
+    const challenge = cloudStore.adminOtpChallenge;
+
+    if (!challenge || challenge.used) {
+      res.status(400).json({
+        ok: false,
+        error: 'No active OTP verification request found or OTP has already been used.',
+      });
+      return;
+    }
+
+    if (Date.now() > challenge.expiresAt) {
+      cloudStore.adminOtpChallenge = { ...challenge, used: true };
+      saveCloudStore();
+      res.status(400).json({
+        ok: false,
+        error: 'Verification OTP has expired (5-minute limit). Please request a new OTP.',
+      });
+      return;
+    }
+
+    if (challenge.attempts >= challenge.maxAttempts) {
+      cloudStore.adminOtpChallenge = { ...challenge, used: true };
+      saveCloudStore();
+      res.status(429).json({
+        ok: false,
+        error: 'Maximum OTP verification attempts exceeded. Please request a new OTP.',
+      });
+      return;
+    }
+
+    // Cross-action protection: OTP for username change cannot be used for password change or vice versa
+    if (actionType && actionType !== challenge.actionType) {
+      challenge.attempts += 1;
+      saveCloudStore();
+      res.status(400).json({
+        ok: false,
+        error: `This OTP was issued for "${challenge.actionType}" and cannot be used for "${actionType}".`,
+      });
+      return;
+    }
+
+    if (!/^\d{6}$/.test(cleanOtp)) {
+      challenge.attempts += 1;
+      saveCloudStore();
+      res.status(400).json({
+        ok: false,
+        error: 'Please enter a valid 6-digit numeric OTP.',
+      });
+      return;
+    }
+
+    const isOtpValid = verifyScryptPassword(
+      `${challenge.challengeId}::${challenge.actionType}::${cleanOtp}`,
+      challenge.otpHash
+    );
+
+    if (!isOtpValid) {
+      challenge.attempts += 1;
+      const remaining = Math.max(0, challenge.maxAttempts - challenge.attempts);
+      if (remaining === 0) {
+        challenge.used = true;
+      }
+      saveCloudStore();
+      res.status(401).json({
+        ok: false,
+        remainingAttempts: remaining,
+        error:
+          remaining > 0
+            ? `Invalid OTP code (${remaining} attempt${remaining === 1 ? '' : 's'} remaining).`
+            : 'Invalid OTP code. Maximum attempts reached; this OTP is now invalidated.',
+      });
+      return;
+    }
+
+    // OTP is valid! Mark used immediately (single-use enforcement)
+    const previousLoginId = active.loginId;
+    const nextLoginId = challenge.pendingLoginId || active.loginId;
+    const nextPasswordHash = challenge.pendingPasswordHash || active.passwordHash;
+    const nextSessionVersion = (active.sessionVersion || 1) + 1;
+
+    challenge.used = true;
+    cloudStore.adminOtpChallenge = null;
+    cloudStore.adminConfig = {
+      loginId: nextLoginId,
+      passwordHash: nextPasswordHash,
+      sessionVersion: nextSessionVersion,
+      updatedAt: Date.now(),
+    };
+
+    const auditAction =
+      challenge.actionType === 'change_username'
+        ? 'admin_username_change'
+        : challenge.actionType === 'change_password'
+        ? 'admin_password_change'
+        : 'admin_credentials_change';
+
+    recordAdminSecurityAudit({
+      action: auditAction,
+      actorAdminId: previousLoginId,
+      oldValue:
+        challenge.actionType === 'change_password' ? '[PASSWORD_HASH]' : previousLoginId,
+      newValue:
+        challenge.actionType === 'change_password' ? '[PASSWORD_ROTATED]' : nextLoginId,
+      summary:
+        challenge.actionType === 'change_username'
+          ? `Admin Login ID changed from "${previousLoginId}" to "${nextLoginId}" via Email OTP verification.`
+          : challenge.actionType === 'change_password'
+          ? `Admin Passcode rotated for "${nextLoginId}" via Email OTP verification.`
+          : `Admin Login ID ("${previousLoginId}" -> "${nextLoginId}") and Passcode rotated via Email OTP verification.`,
+    });
+
+    saveCloudStore();
+
+    const newToken = createSignedToken(nextLoginId, nextSessionVersion);
+    res.setHeader(
+      'Set-Cookie',
+      `zyvra_admin_token=${newToken}; HttpOnly; SameSite=Lax; Path=/; Max-Age=28800`
+    );
+
+    res.json({
+      ok: true,
+      loginId: nextLoginId,
+      token: newToken,
+      sessionVersion: nextSessionVersion,
+      actionType: challenge.actionType,
+      auditLogs: (cloudStore.adminAuditLogs || []).slice(0, 50),
+      message:
+        challenge.actionType === 'change_username'
+          ? `Admin Login ID updated to "${nextLoginId}". Previous sessions have been invalidated.`
+          : challenge.actionType === 'change_password'
+          ? 'Admin Passcode updated securely. Previous sessions have been invalidated.'
+          : `Admin Login ID ("${nextLoginId}") and Passcode updated securely.`,
+    });
+  });
+
+  // ==========================================================================
+  // 1C. STUDENT WHATSAPP NUMBER MANAGEMENT & KEY DIRECTORY (ADMIN ONLY)
+  // ==========================================================================
+  app.get('/api/admin/students', requireAdminAuth, (req: Request, res: Response) => {
+    const db = ensureMasterDbArrays();
+    const searchQuery = String(req.query.q || '').trim().toLowerCase();
+
+    const salesList: Array<Record<string, any>> = Array.isArray(db.salesLog) ? db.salesLog : [];
+    const statesMap = cloudStore.studentStates || {};
+    const activatedMap = cloudStore.activatedKeys || {};
+
+    // Build combined view of all sale/key records + synced student profiles
+    const seenProfileDevices = new Set<string>();
+    const combinedRecords: Array<Record<string, any>> = [];
+
+    for (const sale of salesList) {
+      if (!sale) continue;
+      const devId = String(sale.deviceId || '').trim().toUpperCase();
+      if (devId) seenProfileDevices.add(devId);
+      const profile = devId ? statesMap[devId] : undefined;
+      const rawWa =
+        sale.whatsappNumber ||
+        sale.mobile ||
+        profile?.whatsappNumber ||
+        profile?.mobileNumber ||
+        '';
+      const norm = normalizeServerWhatsAppNumber(rawWa);
+      const proKey = sale.proKey || sale.generatedProKey || profile?.activatedProKey || '';
+      const keyMeta = proKey ? activatedMap[proKey] : undefined;
+
+      combinedRecords.push({
+        recordType: profile ? 'sale_and_profile' : 'sale_only',
+        saleId: sale.id,
+        deviceId: devId,
+        studentName: sale.studentName || profile?.studentName || 'Student Aspirant',
+        mobile: norm.valid ? norm.localMobile : String(sale.mobile || profile?.mobileNumber || ''),
+        whatsappNumber: norm.valid ? norm.normalized : String(rawWa),
+        whatsappVerified: Boolean(sale.whatsappVerified ?? false),
+        whatsappUpdatedAt: sale.whatsappUpdatedAt || profile?.whatsappUpdatedAt || null,
+        whatsappUpdatedBy: sale.whatsappUpdatedBy || profile?.whatsappUpdatedBy || null,
+        proKey,
+        utrNumber: sale.utrNumber || 'DIRECT-KEY',
+        amountPaid: Number(sale.amountPaid ?? 0),
+        couponUsed: sale.couponUsed || sale.couponCode || 'NONE',
+        unlockedScope: sale.unlockedScope || sale.examScope || 'Universal All-Exams Pro',
+        activatedAt: sale.activatedAt || profile?.activatedAt || '',
+        paymentStatus: sale.paymentStatus || 'verified',
+        keyRevoked: Boolean(sale.keyRevoked || keyMeta?.revoked),
+        keyExpiresAt: sale.keyExpiresAt || keyMeta?.expiresAt || null,
+        testAttemptsCount: Array.isArray(profile?.testHistory) ? profile.testHistory.length : 0,
+        testHistoryCount: Array.isArray(profile?.testHistory) ? profile.testHistory.length : 0,
+        hasSyncedProfile: Boolean(profile),
+      });
+    }
+
+    for (const [rawDevId, profile] of Object.entries(statesMap)) {
+      const devId = String(rawDevId || '').trim().toUpperCase();
+      if (!devId || seenProfileDevices.has(devId)) continue;
+      const rawWa = profile?.whatsappNumber || profile?.mobileNumber || '';
+      const norm = normalizeServerWhatsAppNumber(rawWa);
+      const proKey = profile?.activatedProKey || '';
+      const keyMeta = proKey ? activatedMap[proKey] : undefined;
+
+      combinedRecords.push({
+        recordType: 'profile_only',
+        saleId: null,
+        deviceId: devId,
+        studentName: profile?.studentName || 'Student Aspirant',
+        mobile: norm.valid ? norm.localMobile : String(profile?.mobileNumber || ''),
+        whatsappNumber: norm.valid ? norm.normalized : String(rawWa),
+        whatsappVerified: Boolean(profile?.whatsappVerified ?? false),
+        whatsappUpdatedAt: profile?.whatsappUpdatedAt || null,
+        whatsappUpdatedBy: profile?.whatsappUpdatedBy || null,
+        proKey,
+        utrNumber: 'NO-SALE-RECORD',
+        amountPaid: 0,
+        paymentStatus: 'free',
+        couponUsed: 'NONE',
+        unlockedScope: profile?.isProUnlocked ? 'Universal All-Exams Pro' : 'Free Tier',
+        activatedAt: profile?.activatedAt || '',
+        keyRevoked: Boolean(keyMeta?.revoked),
+        keyExpiresAt: profile?.keyExpiresAt || keyMeta?.expiresAt || null,
+        testAttemptsCount: Array.isArray(profile?.testHistory) ? profile.testHistory.length : 0,
+        testHistoryCount: Array.isArray(profile?.testHistory) ? profile.testHistory.length : 0,
+        hasSyncedProfile: true,
+      });
+    }
+
+    const filtered = searchQuery
+      ? combinedRecords.filter((rec) => {
+          const hay = [
+            rec.studentName,
+            rec.deviceId,
+            rec.proKey,
+            rec.utrNumber,
+            rec.mobile,
+            rec.whatsappNumber,
+            rec.saleId,
+          ]
+            .filter(Boolean)
+            .join(' ')
+            .toLowerCase();
+          return hay.includes(searchQuery);
+        })
+      : combinedRecords;
+
+    res.json({
+      ok: true,
+      students: filtered,
+      totalCount: combinedRecords.length,
+      auditLogs: (cloudStore.adminAuditLogs || []).filter(
+        (l) => l.action === 'student_whatsapp_update' || l.action === 'student_key_status_update'
+      ),
+    });
+  });
+
+  app.patch('/api/admin/students/whatsapp', requireAdminAuth, (req: Request, res: Response) => {
+    const adminUser = (req as any).adminUser;
+    const {
+      saleId = null,
+      deviceId = '',
+      newWhatsAppNumber = '',
+      whatsappNumber = '',
+      updateScope = 'both',
+      confirmImpact = false,
+    } = req.body || {};
+
+    if (confirmImpact !== true) {
+      res.status(400).json({
+        ok: false,
+        error:
+          'Confirmation required: Please confirm the impact of updating this student WhatsApp number before saving.',
+      });
+      return;
+    }
+
+    const cleanDeviceId = String(deviceId || '').trim().toUpperCase();
+    const cleanSaleId = saleId ? String(saleId).trim() : null;
+
+    if (!cleanDeviceId && !cleanSaleId) {
+      res.status(400).json({
+        ok: false,
+        error: 'Either saleId or deviceId is required to identify the student record.',
+      });
+      return;
+    }
+
+    if (!['sale_only', 'profile_only', 'both'].includes(updateScope)) {
+      res.status(400).json({
+        ok: false,
+        error: 'Invalid updateScope. Expected sale_only, profile_only, or both.',
+      });
+      return;
+    }
+
+    const candidateNumber = String(whatsappNumber || newWhatsAppNumber || '');
+    const phoneCheck = normalizeServerWhatsAppNumber(candidateNumber);
+    if (!phoneCheck.valid) {
+      res.status(400).json({
+        ok: false,
+        error: phoneCheck.error || 'Invalid WhatsApp phone number format.',
+      });
+      return;
+    }
+
+    const db = ensureMasterDbArrays();
+    const salesList: Array<Record<string, any>> = Array.isArray(db.salesLog) ? db.salesLog : [];
+    const targetSale = cleanSaleId
+      ? salesList.find((s) => s && s.id === cleanSaleId)
+      : salesList.find((s) => s && String(s.deviceId || '').toUpperCase() === cleanDeviceId);
+
+    const resolvedDeviceId =
+      cleanDeviceId || (targetSale ? String(targetSale.deviceId || '').toUpperCase() : '');
+    const targetProfile = resolvedDeviceId
+      ? cloudStore.studentStates[resolvedDeviceId]
+      : undefined;
+
+    if (!targetSale && !targetProfile) {
+      res.status(404).json({
+        ok: false,
+        error: 'Target student sale record or synced profile not found.',
+      });
+      return;
+    }
+
+    if (updateScope === 'sale_only' && !targetSale) {
+      res.status(404).json({
+        ok: false,
+        error: 'No purchase/key record found for sale_only update scope.',
+      });
+      return;
+    }
+
+    if (updateScope === 'profile_only' && !targetProfile) {
+      res.status(404).json({
+        ok: false,
+        error: 'No synced student profile found for profile_only update scope.',
+      });
+      return;
+    }
+
+    const oldRaw =
+      (updateScope !== 'profile_only' &&
+        (targetSale?.whatsappNumber || targetSale?.mobile)) ||
+      targetProfile?.whatsappNumber ||
+      targetProfile?.mobileNumber ||
+      'UNSET';
+    const oldNorm = normalizeServerWhatsAppNumber(String(oldRaw));
+    const oldFormatted = oldNorm.valid ? oldNorm.normalized : String(oldRaw);
+
+    const updatedAtIso = new Date().toISOString();
+    const actorAdminId = adminUser?.sub || getActiveAdminCredentials().loginId || 'admin';
+
+    // Update sale record if in scope — strictly preserving deviceId, proKey, amountPaid, utrNumber
+    if ((updateScope === 'sale_only' || updateScope === 'both') && targetSale) {
+      targetSale.whatsappNumber = phoneCheck.normalized;
+      targetSale.mobile = phoneCheck.localMobile;
+      targetSale.whatsappVerified = false; // Admin edit does NOT verify ownership
+      targetSale.whatsappUpdatedAt = updatedAtIso;
+      targetSale.whatsappUpdatedBy = actorAdminId;
+    }
+
+    // Update student profile if in scope — strictly preserving deviceId, activatedProKey, testHistory
+    if ((updateScope === 'profile_only' || updateScope === 'both') && targetProfile) {
+      targetProfile.whatsappNumber = phoneCheck.normalized;
+      targetProfile.mobileNumber = phoneCheck.localMobile;
+      targetProfile.whatsappVerified = false; // Unverified until student completes verification
+      targetProfile.whatsappUpdatedAt = updatedAtIso;
+      targetProfile.whatsappUpdatedBy = actorAdminId;
+    }
+
+    // Update activatedKeys metadata if a key exists for this sale/device
+    const proKey =
+      targetSale?.proKey ||
+      targetSale?.generatedProKey ||
+      targetProfile?.activatedProKey ||
+      '';
+    if (proKey && cloudStore.activatedKeys?.[proKey] && updateScope !== 'profile_only') {
+      cloudStore.activatedKeys[proKey].whatsappNumber = phoneCheck.normalized;
+      cloudStore.activatedKeys[proKey].whatsappVerified = false;
+    }
+
+    const studentName =
+      targetSale?.studentName || targetProfile?.studentName || 'Student Aspirant';
+
+    const auditEntry = recordAdminSecurityAudit({
+      action: 'student_whatsapp_update',
+      actorAdminId,
+      targetDeviceId: resolvedDeviceId,
+      targetSaleId: targetSale?.id || undefined,
+      targetStudentName: studentName,
+      updateScope,
+      oldValue: oldFormatted,
+      newValue: phoneCheck.normalized,
+      whatsappVerified: false,
+      summary: `Admin "${actorAdminId}" updated WhatsApp number for ${studentName} (${resolvedDeviceId}) from ${oldFormatted} to ${phoneCheck.normalized} [scope: ${updateScope}, status: unverified].`,
+    });
+
+    db.lastUpdated = Date.now();
+    saveCloudStore();
+
+    res.json({
+      ok: true,
+      deviceId: resolvedDeviceId,
+      saleId: targetSale?.id || null,
+      studentName,
+      oldWhatsAppNumber: oldFormatted,
+      whatsappNumber: phoneCheck.normalized,
+      mobile: phoneCheck.localMobile,
+      whatsappVerified: false,
+      whatsappUpdatedAt: updatedAtIso,
+      whatsappUpdatedBy: actorAdminId,
+      updateScope,
+      updatedSale: targetSale || null,
+      updatedProfile: targetProfile || null,
+      auditEntry,
+      message: `Updated WhatsApp number to ${phoneCheck.normalized} (marked as Unverified). Device ID, Pro Key, payment history, and test records were preserved untouched.`,
+    });
+  });
+
+  app.post('/api/admin/students/key-status', requireAdminAuth, (req: Request, res: Response) => {
+    const adminUser = (req as any).adminUser;
+    const {
+      proKey = '',
+      deviceId = '',
+      saleId = '',
+      revoked,
+      keyRevoked,
+      expiresAt = null,
+      keyExpiresAt = null,
+    } = req.body || {};
+    const cleanKey = String(proKey || '').trim().toUpperCase();
+    const cleanDevice = String(deviceId || '').trim().toUpperCase();
+    const cleanSaleId = String(saleId || '').trim();
+    const isRevoked = Boolean(keyRevoked ?? revoked ?? false);
+    const effectiveExpiresAt = keyExpiresAt ?? expiresAt ?? null;
+
+    if (!cleanKey && !cleanDevice && !cleanSaleId) {
+      res.status(400).json({ ok: false, error: 'proKey, saleId, or deviceId is required.' });
+      return;
+    }
+
+    const db = ensureMasterDbArrays();
+    const targetSale = (db.salesLog || []).find(
+      (s: any) =>
+        (cleanSaleId && s.id === cleanSaleId) ||
+        (cleanKey && (s.proKey === cleanKey || s.generatedProKey === cleanKey)) ||
+        (cleanDevice && String(s.deviceId || '').toUpperCase() === cleanDevice)
+    );
+
+    const resolvedKey =
+      cleanKey ||
+      targetSale?.proKey ||
+      targetSale?.generatedProKey ||
+      generateServerProKey(cleanDevice);
+    const resolvedDevice = cleanDevice || String(targetSale?.deviceId || '').toUpperCase();
+
+    cloudStore.activatedKeys = cloudStore.activatedKeys || {};
+    const existingKeyRec = cloudStore.activatedKeys[resolvedKey] || {
+      proKey: resolvedKey,
+      deviceId: resolvedDevice,
+      studentName: targetSale?.studentName || 'Student Aspirant',
+      whatsappNumber: targetSale?.whatsappNumber || targetSale?.mobile || '',
+      whatsappVerified: false,
+      activatedAt: Date.now(),
+      expiresAt: null,
+      revoked: false,
+    };
+
+    existingKeyRec.revoked = isRevoked;
+    existingKeyRec.expiresAt = effectiveExpiresAt
+      ? Number(new Date(effectiveExpiresAt).getTime()) || null
+      : null;
+    cloudStore.activatedKeys[resolvedKey] = existingKeyRec;
+
+    if (targetSale) {
+      targetSale.keyRevoked = isRevoked;
+      targetSale.keyExpiresAt = effectiveExpiresAt ? String(effectiveExpiresAt) : undefined;
+    }
+
+    if (resolvedDevice && cloudStore.studentStates[resolvedDevice]) {
+      if (isRevoked) {
+        cloudStore.studentStates[resolvedDevice].isProUnlocked = false;
+      }
+      cloudStore.studentStates[resolvedDevice].keyExpiresAt = effectiveExpiresAt
+        ? String(effectiveExpiresAt)
+        : undefined;
+    }
+
+    const actorAdminId = adminUser?.sub || getActiveAdminCredentials().loginId || 'admin';
+    const auditEntry = recordAdminSecurityAudit({
+      action: 'student_key_status_update',
+      actorAdminId,
+      targetDeviceId: resolvedDevice,
+      targetSaleId: targetSale?.id,
+      oldValue: 'active',
+      newValue: revoked ? 'revoked' : expiresAt ? `expires:${expiresAt}` : 'active',
+      summary: `Admin "${actorAdminId}" updated key ${resolvedKey} (${resolvedDevice}) -> revoked=${Boolean(revoked)}, expiresAt=${expiresAt || 'none'}.`,
+    });
+
+    db.lastUpdated = Date.now();
+    saveCloudStore();
+
+    res.json({
+      ok: true,
+      keyRecord: existingKeyRec,
+      auditEntry,
+    });
+  });
+
+  // ==========================================================================
+  // 1D. STUDENT DEVICE-BASED SESSION & KEY ACTIVATION (NO ROUTINE OTP)
+  // ==========================================================================
+  app.post('/api/student/session/init', (req: Request, res: Response) => {
+    const { deviceId = '', deviceSecret = '', mobileNumber = '', studentName = '' } =
+      req.body || {};
+    const cleanDeviceId = String(deviceId || '').trim().toUpperCase();
+    const headerSecret = String(req.headers['x-zyvra-device-secret'] || deviceSecret || '').trim();
+    const headerToken = String(req.headers['x-zyvra-student-token'] || '').trim();
+
+    if (!cleanDeviceId) {
+      res.status(400).json({ ok: false, error: 'deviceId is required.' });
+      return;
+    }
+
+    const bindCheck = verifyOrBindStudentDevice(cleanDeviceId, headerSecret, headerToken);
+    if (!bindCheck.ok) {
+      res.status(403).json({ ok: false, error: bindCheck.error });
+      return;
+    }
+
+    const profile = cloudStore.studentStates[cleanDeviceId] || null;
+    const expectedKey = generateServerProKey(cleanDeviceId);
+    const keyMeta = expectedKey ? cloudStore.activatedKeys?.[expectedKey] : undefined;
+    const isKeyRevokedOrExpired = Boolean(
+      keyMeta &&
+        (keyMeta.revoked || (keyMeta.expiresAt && Date.now() > Number(keyMeta.expiresAt)))
+    );
+
+    if (profile && isKeyRevokedOrExpired) {
+      profile.isProUnlocked = false;
+    }
+
+    res.json({
+      ok: true,
+      deviceId: cleanDeviceId,
+      studentSessionToken: bindCheck.sessionToken,
+      isProUnlocked: isKeyRevokedOrExpired ? false : Boolean(profile?.isProUnlocked),
+      keyRevoked: Boolean(keyMeta?.revoked),
+      keyExpiresAt: keyMeta?.expiresAt || null,
+      studentName: profile?.studentName || studentName || 'Zyvra Exam Aspirant',
+      whatsappNumber: profile?.whatsappNumber || (mobileNumber ? `+91${String(mobileNumber).replace(/\D/g, '').slice(-10)}` : ''),
+      whatsappVerified: Boolean(profile?.whatsappVerified),
+    });
+  });
+
+  app.post('/api/student/key/activate', (req: Request, res: Response) => {
+    const {
+      deviceId = '',
+      deviceSecret = '',
+      proKey = '',
+      studentName = 'Student Aspirant',
+      mobileNumber = '',
+      whatsappNumber = '',
+      utrNumber = 'DIRECT-KEY',
+      amountPaid = 149,
+      couponCode = 'NONE',
+    } = req.body || {};
+
+    const cleanDeviceId = String(deviceId || '').trim().toUpperCase();
+    const cleanKey = String(proKey || '').trim().toUpperCase();
+    const headerSecret = String(req.headers['x-zyvra-device-secret'] || deviceSecret || '').trim();
+    const headerToken = String(req.headers['x-zyvra-student-token'] || '').trim();
+
+    if (!cleanDeviceId || !cleanKey) {
+      res.status(400).json({
+        ok: false,
+        error: 'Both Device ID and Pro Activation Key are required.',
+      });
+      return;
+    }
+
+    const bindCheck = verifyOrBindStudentDevice(cleanDeviceId, headerSecret, headerToken);
+    if (!bindCheck.ok) {
+      res.status(403).json({ ok: false, error: bindCheck.error });
+      return;
+    }
+
+    const expectedKey = generateServerProKey(cleanDeviceId);
+    if (!expectedKey || cleanKey !== expectedKey) {
+      res.status(400).json({
+        ok: false,
+        error:
+          'Invalid Activation Key! This Pro Key does not match your Hardware Device Lock ID.',
+      });
+      return;
+    }
+
+    cloudStore.activatedKeys = cloudStore.activatedKeys || {};
+    const existingActivation = cloudStore.activatedKeys[cleanKey];
+
+    // Enforce single-device key lock, revocation, and expiration
+    if (existingActivation && existingActivation.deviceId !== cleanDeviceId) {
+      res.status(409).json({
+        ok: false,
+        error:
+          'Device limit reached: This Pro Activation Key is already locked to another device.',
+      });
+      return;
+    }
+
+    if (existingActivation?.revoked) {
+      res.status(403).json({
+        ok: false,
+        error: 'This Pro Activation Key has been revoked by the Administrator.',
+      });
+      return;
+    }
+
+    if (existingActivation?.expiresAt && Date.now() > Number(existingActivation.expiresAt)) {
+      res.status(403).json({
+        ok: false,
+        error: 'This Pro Activation Key has expired.',
+      });
+      return;
+    }
+
+    const phoneCheck = normalizeServerWhatsAppNumber(
+      String(whatsappNumber || mobileNumber || '9876543210')
+    );
+    const normalizedWa = phoneCheck.valid ? phoneCheck.normalized : '+919876543210';
+    const localMob = phoneCheck.valid ? phoneCheck.localMobile : '9876543210';
+
+    cloudStore.activatedKeys[cleanKey] = {
+      proKey: cleanKey,
+      deviceId: cleanDeviceId,
+      studentName: String(studentName || 'Student Aspirant').trim(),
+      whatsappNumber: normalizedWa,
+      whatsappVerified: false,
+      activatedAt: existingActivation?.activatedAt || Date.now(),
+      expiresAt: existingActivation?.expiresAt || null,
+      revoked: false,
+    };
+
+    const db = ensureMasterDbArrays();
+    const existingSale = (db.salesLog || []).find(
+      (s: any) =>
+        String(s?.deviceId || '').toUpperCase() === cleanDeviceId &&
+        (s?.proKey === cleanKey || s?.generatedProKey === cleanKey)
+    );
+
+    if (!existingSale) {
+      const saleEntry = {
+        id: `sale-${Date.now()}`,
+        studentName: String(studentName || 'Student Aspirant').trim(),
+        mobile: localMob,
+        whatsappNumber: normalizedWa,
+        whatsappVerified: false,
+        deviceId: cleanDeviceId,
+        utrNumber: String(utrNumber || 'DIRECT-KEY').trim(),
+        amountPaid: Number(amountPaid) || 149,
+        couponUsed: String(couponCode || 'NONE').trim(),
+        couponCode: String(couponCode || 'NONE').trim(),
+        proKey: cleanKey,
+        generatedProKey: cleanKey,
+        unlockedScope: 'Universal All-Exams Pro',
+        activatedAt: new Date().toLocaleString('en-IN'),
+      };
+      db.salesLog = [saleEntry, ...(db.salesLog || [])];
+    }
+
+    const existingState = cloudStore.studentStates[cleanDeviceId] || {};
+    cloudStore.studentStates[cleanDeviceId] = {
+      ...existingState,
+      studentName: String(studentName || existingState.studentName || 'Student Aspirant').trim(),
+      mobileNumber: existingState.whatsappUpdatedBy ? existingState.mobileNumber : localMob,
+      whatsappNumber: existingState.whatsappUpdatedBy ? existingState.whatsappNumber : normalizedWa,
+      whatsappVerified: Boolean(existingState.whatsappVerified),
+      deviceId: cleanDeviceId,
+      isProUnlocked: true,
+      activatedProKey: cleanKey,
+      activatedAt: new Date().toLocaleString('en-IN'),
+    };
+
+    db.lastUpdated = Date.now();
+    saveCloudStore();
+
+    res.json({
+      ok: true,
+      deviceId: cleanDeviceId,
+      proKey: cleanKey,
+      whatsappNumber: cloudStore.studentStates[cleanDeviceId].whatsappNumber,
+      whatsappVerified: false,
+      studentSessionToken: bindCheck.sessionToken,
+      message: 'Zyvra Pro Key verified and locked to this device.',
+    });
+  });
+
+  app.post('/api/student/session/logout', (req: Request, res: Response) => {
+    const { deviceId = '', deviceSecret = '' } = req.body || {};
+    const cleanDeviceId = String(deviceId || '').trim().toUpperCase();
+    const headerSecret = String(req.headers['x-zyvra-device-secret'] || deviceSecret || '').trim();
+    const headerToken = String(req.headers['x-zyvra-student-token'] || '').trim();
+
+    if (cleanDeviceId && cloudStore.studentDeviceBindings?.[cleanDeviceId]) {
+      const bindCheck = verifyOrBindStudentDevice(cleanDeviceId, headerSecret, headerToken);
+      if (bindCheck.ok) {
+        cloudStore.studentDeviceBindings[cleanDeviceId].sessionVersion += 1;
+        saveCloudStore();
+      }
+    }
+    res.json({
+      ok: true,
+      message: 'Local student device session cleared safely.',
+    });
+  });
+
+  // 2. Real Cloud Sync Endpoints (Phase 3 + Device Anti-Spoofing Protection)
   app.get('/api/sync/bootstrap', (req: Request, res: Response) => {
-    const deviceId = String(req.query.deviceId || '').trim();
-    const studentState = deviceId ? cloudStore.studentStates[deviceId] || null : null;
+    const deviceId = String(req.query.deviceId || '').trim().toUpperCase();
+    const headerSecret = String(req.headers['x-zyvra-device-secret'] || '').trim();
+    const headerToken = String(req.headers['x-zyvra-student-token'] || '').trim();
+
+    let studentState = null;
+    let studentSessionToken: string | undefined;
+
+    if (deviceId) {
+      const existingBinding = cloudStore.studentDeviceBindings?.[deviceId];
+      if (existingBinding) {
+        const check = verifyOrBindStudentDevice(deviceId, headerSecret, headerToken);
+        if (!check.ok) {
+          res.status(403).json({
+            ok: false,
+            error: check.error,
+          });
+          return;
+        }
+        studentSessionToken = check.sessionToken;
+      } else if (headerSecret) {
+        const check = verifyOrBindStudentDevice(deviceId, headerSecret, headerToken);
+        studentSessionToken = check.sessionToken;
+      }
+      studentState = cloudStore.studentStates[deviceId] || null;
+    }
+
     res.json({
       ok: true,
       masterDb: cloudStore.masterDb,
       studentState,
+      studentSessionToken,
       serverTimestamp: Date.now(),
     });
   });
 
   app.post('/api/sync/student', (req: Request, res: Response) => {
-    const { deviceId, studentState, queuedItems = [] } = req.body || {};
-    const cleanDeviceId = String(deviceId || studentState?.deviceId || '').trim();
+    const { deviceId, deviceSecret, studentState, queuedItems = [] } = req.body || {};
+    const cleanDeviceId = String(deviceId || studentState?.deviceId || '')
+      .trim()
+      .toUpperCase();
     if (!cleanDeviceId || !studentState) {
       res.status(400).json({ ok: false, error: 'deviceId and studentState are required.' });
+      return;
+    }
+
+    const headerSecret = String(
+      req.headers['x-zyvra-device-secret'] || deviceSecret || ''
+    ).trim();
+    const headerToken = String(
+      req.headers['x-zyvra-student-token'] || studentState?.studentSessionToken || ''
+    ).trim();
+
+    const bindCheck = verifyOrBindStudentDevice(cleanDeviceId, headerSecret, headerToken);
+    if (!bindCheck.ok) {
+      res.status(403).json({
+        ok: false,
+        error: bindCheck.error,
+      });
       return;
     }
 
@@ -522,11 +2036,12 @@ async function startServer() {
     const existingHistory = Array.isArray(existing.testHistory) ? existing.testHistory : [];
     const incomingHistory = Array.isArray(studentState.testHistory) ? studentState.testHistory : [];
 
-    // Deduplicate test attempts by attemptId
+    // Deduplicate test attempts by attemptId or id
     const historyMap = new Map<string, any>();
     for (const item of [...existingHistory, ...incomingHistory]) {
-      if (item && item.attemptId) {
-        historyMap.set(item.attemptId, item);
+      const key = item?.attemptId || item?.id;
+      if (key) {
+        historyMap.set(String(key), item);
       }
     }
 
@@ -538,8 +2053,8 @@ async function startServer() {
         if (cloudStore.processedIdempotencyKeys[qItem.idempotencyKey]) continue;
         cloudStore.processedIdempotencyKeys[qItem.idempotencyKey] = Date.now();
 
-        if (qItem.type === 'test_attempt' && qItem.payload?.attemptId) {
-          historyMap.set(qItem.payload.attemptId, qItem.payload);
+        if (qItem.type === 'test_attempt' && (qItem.payload?.attemptId || qItem.payload?.id)) {
+          historyMap.set(String(qItem.payload.attemptId || qItem.payload.id), qItem.payload);
         } else if (qItem.type === 'feedback' && qItem.payload?.id) {
           const exists = db.feedbackList.some((f: any) => f.id === qItem.payload.id);
           if (!exists) db.feedbackList.unshift(qItem.payload);
@@ -551,10 +2066,41 @@ async function startServer() {
     }
 
     const mergedBookmarks = Array.from(
-      new Set([...(existing.bookmarks || []), ...(studentState.bookmarks || [])])
+      new Set([
+        ...(existing.bookmarks || []),
+        ...(studentState.bookmarks || []),
+        ...(existing.bookmarkedQuestionIds || []),
+        ...(studentState.bookmarkedQuestionIds || []),
+      ])
     );
     const mergedMistakes = Array.from(
-      new Set([...(existing.mistakeNotebookIds || []), ...(studentState.mistakeNotebookIds || [])])
+      new Set([
+        ...(existing.mistakeNotebookIds || []),
+        ...(studentState.mistakeNotebookIds || []),
+      ])
+    );
+
+    // Preserve Admin-edited WhatsApp number unless student state explicitly carries a newer timestamp
+    const preserveAdminWa = Boolean(
+      existing.whatsappUpdatedAt &&
+        (!studentState.whatsappUpdatedAt ||
+          existing.whatsappUpdatedAt >= studentState.whatsappUpdatedAt)
+    );
+    const rawWa = preserveAdminWa
+      ? existing.whatsappNumber || existing.mobileNumber
+      : studentState.whatsappNumber ||
+        studentState.mobileNumber ||
+        existing.whatsappNumber ||
+        existing.mobileNumber ||
+        '';
+    const waNorm = normalizeServerWhatsAppNumber(String(rawWa));
+
+    // Check if Pro Key for this device has been revoked or expired by Admin
+    const expectedKey = generateServerProKey(cleanDeviceId);
+    const keyMeta = expectedKey ? cloudStore.activatedKeys?.[expectedKey] : undefined;
+    const isRevokedOrExpired = Boolean(
+      keyMeta &&
+        (keyMeta.revoked || (keyMeta.expiresAt && Date.now() > Number(keyMeta.expiresAt)))
     );
 
     const syncedAt = Date.now();
@@ -562,8 +2108,30 @@ async function startServer() {
       ...existing,
       ...studentState,
       deviceId: cleanDeviceId,
-      isProUnlocked: Boolean(existing.isProUnlocked || studentState.isProUnlocked),
+      mobileNumber: preserveAdminWa
+        ? existing.mobileNumber
+        : waNorm.valid
+        ? waNorm.localMobile
+        : studentState.mobileNumber || existing.mobileNumber,
+      whatsappNumber: preserveAdminWa
+        ? existing.whatsappNumber
+        : waNorm.valid
+        ? waNorm.normalized
+        : studentState.whatsappNumber || existing.whatsappNumber,
+      whatsappVerified: preserveAdminWa
+        ? Boolean(existing.whatsappVerified)
+        : Boolean(studentState.whatsappVerified ?? existing.whatsappVerified ?? false),
+      whatsappUpdatedAt: preserveAdminWa
+        ? existing.whatsappUpdatedAt
+        : studentState.whatsappUpdatedAt || existing.whatsappUpdatedAt,
+      whatsappUpdatedBy: preserveAdminWa
+        ? existing.whatsappUpdatedBy
+        : studentState.whatsappUpdatedBy || existing.whatsappUpdatedBy,
+      isProUnlocked: isRevokedOrExpired
+        ? false
+        : Boolean(existing.isProUnlocked || studentState.isProUnlocked),
       bookmarks: mergedBookmarks,
+      bookmarkedQuestionIds: mergedBookmarks,
       mistakeNotebookIds: mergedMistakes,
       testHistory: Array.from(historyMap.values()).sort(
         (a, b) => Number(b.timestamp || 0) - Number(a.timestamp || 0)
@@ -578,6 +2146,7 @@ async function startServer() {
     res.json({
       ok: true,
       studentState: mergedState,
+      studentSessionToken: bindCheck.sessionToken,
       masterDb: cloudStore.masterDb,
       syncedAt,
     });
@@ -590,15 +2159,41 @@ async function startServer() {
       return;
     }
 
-    const combinedFeedback = Array.isArray(masterDb.feedbackList) && masterDb.feedbackList.length > 0
-      ? masterDb.feedbackList
-      : Array.isArray(masterDb.studentFeedback) && masterDb.studentFeedback.length > 0
-      ? masterDb.studentFeedback
-      : cloudStore.masterDb?.feedbackList || [];
+    const combinedFeedback =
+      Array.isArray(masterDb.feedbackList) && masterDb.feedbackList.length > 0
+        ? masterDb.feedbackList
+        : Array.isArray(masterDb.studentFeedback) && masterDb.studentFeedback.length > 0
+        ? masterDb.studentFeedback
+        : cloudStore.masterDb?.feedbackList || [];
+
+    // Preserve server-side WhatsApp updates on salesLog when merging masterDb
+    const existingSalesMap = new Map<string, Record<string, any>>();
+    for (const s of cloudStore.masterDb?.salesLog || []) {
+      if (s?.id) existingSalesMap.set(String(s.id), s);
+    }
+    const incomingSales = Array.isArray(masterDb.salesLog) ? masterDb.salesLog : [];
+    const mergedSales = incomingSales.map((s: any) => {
+      const prev = s?.id ? existingSalesMap.get(String(s.id)) : undefined;
+      if (prev?.whatsappUpdatedAt && (!s.whatsappUpdatedAt || prev.whatsappUpdatedAt >= s.whatsappUpdatedAt)) {
+        return {
+          ...s,
+          mobile: prev.mobile,
+          whatsappNumber: prev.whatsappNumber,
+          whatsappVerified: prev.whatsappVerified,
+          whatsappUpdatedAt: prev.whatsappUpdatedAt,
+          whatsappUpdatedBy: prev.whatsappUpdatedBy,
+          keyRevoked: prev.keyRevoked ?? s.keyRevoked,
+          keyExpiresAt: prev.keyExpiresAt ?? s.keyExpiresAt,
+        };
+      }
+      return s;
+    });
 
     cloudStore.masterDb = {
       ...cloudStore.masterDb,
       ...masterDb,
+      salesLog: mergedSales.length > 0 ? mergedSales : cloudStore.masterDb?.salesLog || [],
+      adminAuditLogs: cloudStore.adminAuditLogs || [],
       feedbackList: combinedFeedback,
       studentFeedback: combinedFeedback,
       lastUpdated: Date.now(),
@@ -1425,7 +3020,7 @@ async function startServer() {
   // Vite middleware in development, static dist in production
   if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({
-      server: { middlewareMode: true, hmr: false },
+      server: { middlewareMode: true, hmr: false, ws: false },
       appType: 'spa',
     });
     app.use((req, _res, next) => {
