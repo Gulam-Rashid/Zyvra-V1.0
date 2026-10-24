@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
   ArrowLeft,
@@ -7,14 +7,21 @@ import {
   BookmarkCheck,
   CheckCircle2,
   Clock,
-  Eye,
   Flag,
+  Globe,
   HelpCircle,
+  Home,
+  Languages,
   LayoutGrid,
   Lightbulb,
+  Lock,
+  MessageSquarePlus,
+  RefreshCw,
   RotateCcw,
   ShieldCheck,
+  Sliders,
   Sparkles,
+  Star,
   Trophy,
   X,
   XCircle,
@@ -24,9 +31,11 @@ import {
   ActiveTestConfig,
   LanguageMode,
   Question,
+  StudentFeedbackItem,
   StudentLocalState,
   TestAttemptRecord,
 } from '../types/database';
+import { translateQuestionContent } from '../utils/storage';
 
 interface TestEngineModalProps {
   config: ActiveTestConfig;
@@ -36,11 +45,34 @@ interface TestEngineModalProps {
   studentState: StudentLocalState;
   onToggleBookmarkQuestion: (questionId: string) => void;
   onCompleteTest: (record: TestAttemptRecord) => void;
+  onSubmitFeedback?: (feedback: StudentFeedbackItem) => void;
+  onStartNextTest?: () => void;
+  onGoHome?: () => void;
   onClose: () => void;
 }
 
 type TestPhase = 'instructions' | 'active' | 'submitted';
 type ReviewFilter = 'all' | 'wrong' | 'skipped' | 'correct';
+
+type TargetTranslationLang = 'hi' | 'en' | 'bn' | 'mr' | 'ta' | 'te' | 'ur';
+
+interface TranslatedPayload {
+  lang: TargetTranslationLang;
+  questionText: string;
+  options: string[];
+  explanation: string;
+  provider: string;
+}
+
+const TRANSLATION_LANGUAGES: { id: TargetTranslationLang; label: string; native: string }[] = [
+  { id: 'hi', label: 'Hindi', native: 'हिन्दी' },
+  { id: 'en', label: 'English', native: 'English' },
+  { id: 'bn', label: 'Bengali', native: 'বাংলা' },
+  { id: 'mr', label: 'Marathi', native: 'मराठी' },
+  { id: 'ta', label: 'Tamil', native: 'தமிழ்' },
+  { id: 'te', label: 'Telugu', native: 'తెలుగు' },
+  { id: 'ur', label: 'Urdu', native: 'اردو' },
+];
 
 export const TestEngineModal: React.FC<TestEngineModalProps> = ({
   config,
@@ -50,19 +82,52 @@ export const TestEngineModal: React.FC<TestEngineModalProps> = ({
   studentState,
   onToggleBookmarkQuestion,
   onCompleteTest,
+  onSubmitFeedback,
+  onStartNextTest,
+  onGoHome,
   onClose,
 }) => {
   const isDark = theme === 'dark';
-  const questions: Question[] = config.questions || [];
+  const rawQuestions: Question[] = config.questions || [];
 
-  // Phase & Mode state
-  const [phase, setPhase] = useState<TestPhase>('instructions');
+  // Admin Customization Rules enforcement (Phase 8)
+  const rules = useMemo(
+    () =>
+      config.customizationRules || {
+        customizationAllowed: true,
+        allowModeSwitch: true,
+        allowTimerChange: true,
+        allowQuestionCountChange: false,
+        allowCategoryFilter: false,
+        randomizeQuestions: false,
+      },
+    [config.customizationRules]
+  );
+
+  // Customizable pre-test parameters (bounded by Admin rules)
   const [activeMode, setActiveMode] = useState<'practice' | 'exam_hall'>(config.mode);
+  const [activeTimerType, setActiveTimerType] = useState<'overall' | 'sprint' | 'none'>(
+    config.timerType
+  );
+  const [customOverallMinutes, setCustomOverallMinutes] = useState<number>(
+    Math.max(1, config.overallMinutes || 15)
+  );
+  const [customQuestionCount, setCustomQuestionCount] = useState<number>(rawQuestions.length);
+  const [shouldRandomize, setShouldRandomize] = useState<boolean>(
+    Boolean(rules.randomizeQuestions)
+  );
+
+  // Frozen question snapshot locked at test start so mid-test edits never corrupt active attempts
+  const [frozenQuestions, setFrozenQuestions] = useState<Question[]>(rawQuestions);
+  const questions = frozenQuestions.length > 0 ? frozenQuestions : rawQuestions;
+
+  // Phase & Attempt state
+  const [phase, setPhase] = useState<TestPhase>('instructions');
   const [currentIndex, setCurrentIndex] = useState(0);
   const [userAnswers, setUserAnswers] = useState<Record<string, number | null>>({});
   const [markedForReview, setMarkedForReview] = useState<Record<string, boolean>>({});
   const [visitedQuestions, setVisitedQuestions] = useState<Record<string, boolean>>(() =>
-    questions[0] ? { [questions[0].id]: true } : {}
+    rawQuestions[0] ? { [rawQuestions[0].id]: true } : {}
   );
   const [explanationTab, setExplanationTab] = useState<'both' | 'basic' | 'trick'>('both');
   const [showPaletteDrawer, setShowPaletteDrawer] = useState(false);
@@ -70,18 +135,61 @@ export const TestEngineModal: React.FC<TestEngineModalProps> = ({
   const [showExitConfirm, setShowExitConfirm] = useState(false);
   const [reviewFilter, setReviewFilter] = useState<ReviewFilter>('all');
 
+  // Duplicate submission guard (Phase 1)
+  const isSubmittingRef = useRef(false);
+  const [completedAttemptId, setCompletedAttemptId] = useState<string>('');
+  const reviewSectionRef = useRef<HTMLElement | null>(null);
+
+  // Per-question In-Test Translation state (Phase 7)
+  const [targetTranslateLang, setTargetTranslateLang] = useState<TargetTranslationLang>('hi');
+  const [showTranslateSelector, setShowTranslateSelector] = useState(false);
+  const [activeTranslations, setActiveTranslations] = useState<Record<string, TranslatedPayload>>(
+    {}
+  );
+  const [showTranslatedView, setShowTranslatedView] = useState<Record<string, boolean>>({});
+  const [translatingQuestionId, setTranslatingQuestionId] = useState<string | null>(null);
+  const [translationError, setTranslationError] = useState<Record<string, string>>({});
+
+  // Post-Test Optional Student Feedback state (Phase 4)
+  const [feedbackRating, setFeedbackRating] = useState<number>(0);
+  const [feedbackCategory, setFeedbackCategory] = useState<
+    'test_quality' | 'question_error' | 'ui_ux' | 'translation' | 'overall_experience'
+  >('test_quality');
+  const [feedbackMessage, setFeedbackMessage] = useState('');
+  const [feedbackSubmitted, setFeedbackSubmitted] = useState(false);
+
   const marksPerCorrect = config.marksPerCorrect ?? 2.0;
   const negativeMarking = config.negativeMarking ?? 0.5;
   const marksPerUnanswered = config.marksPerUnanswered ?? 0;
 
   // Timers only tick during 'active' phase
   const [overallSecondsLeft, setOverallSecondsLeft] = useState(
-    Math.max(60, (config.overallMinutes || 15) * 60)
+    Math.max(60, customOverallMinutes * 60)
   );
   const [sprintSecondsLeft, setSprintSecondsLeft] = useState(config.sprintSeconds || 45);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
 
   const currentQuestion: Question | undefined = questions[currentIndex];
+
+  // Hardware Back Button / Browser Popstate Protection during Active Test (Phase 1)
+  useEffect(() => {
+    if (phase !== 'active') return;
+    window.history.pushState({ zyvraActiveTest: true }, '');
+    const handlePopState = () => {
+      if (showPaletteDrawer) {
+        setShowPaletteDrawer(false);
+        window.history.pushState({ zyvraActiveTest: true }, '');
+      } else if (showSubmitConfirm) {
+        setShowSubmitConfirm(false);
+        window.history.pushState({ zyvraActiveTest: true }, '');
+      } else {
+        setShowExitConfirm(true);
+        window.history.pushState({ zyvraActiveTest: true }, '');
+      }
+    };
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, [phase, showPaletteDrawer, showSubmitConfirm]);
 
   // Mark question as visited when index changes
   useEffect(() => {
@@ -117,7 +225,7 @@ export const TestEngineModal: React.FC<TestEngineModalProps> = ({
     if (phase !== 'active') return;
     const timer = window.setInterval(() => {
       setElapsedSeconds((prev) => prev + 1);
-      if (config.timerType === 'overall') {
+      if (activeTimerType === 'overall') {
         setOverallSecondsLeft((prev) => {
           if (prev <= 1) {
             return 0;
@@ -127,18 +235,18 @@ export const TestEngineModal: React.FC<TestEngineModalProps> = ({
       }
     }, 1000);
     return () => window.clearInterval(timer);
-  }, [phase, config.timerType]);
+  }, [phase, activeTimerType]);
 
   // Auto-submit when overall timer hits 0
   useEffect(() => {
-    if (phase === 'active' && config.timerType === 'overall' && overallSecondsLeft === 0) {
+    if (phase === 'active' && activeTimerType === 'overall' && overallSecondsLeft === 0) {
       finalizeSubmission();
     }
-  }, [overallSecondsLeft, phase, config.timerType]);
+  }, [overallSecondsLeft, phase, activeTimerType]);
 
   // Sprint per-question timer
   useEffect(() => {
-    if (phase !== 'active' || config.timerType !== 'sprint') return;
+    if (phase !== 'active' || activeTimerType !== 'sprint') return;
     setSprintSecondsLeft(config.sprintSeconds || 45);
     const interval = window.setInterval(() => {
       setSprintSecondsLeft((prev) => {
@@ -152,7 +260,28 @@ export const TestEngineModal: React.FC<TestEngineModalProps> = ({
       });
     }, 1000);
     return () => window.clearInterval(interval);
-  }, [currentIndex, phase, config.timerType, config.sprintSeconds, questions.length]);
+  }, [currentIndex, phase, activeTimerType, config.sprintSeconds, questions.length]);
+
+  const handleStartTestWithSnapshot = () => {
+    isSubmittingRef.current = false;
+    let list = [...rawQuestions];
+    const allowedCustomization = Boolean(rules.customizationAllowed);
+
+    if ((allowedCustomization && shouldRandomize) || (!allowedCustomization && rules.randomizeQuestions)) {
+      list = [...list].sort(() => Math.random() - 0.5);
+    }
+
+    if (allowedCustomization && rules.allowQuestionCountChange) {
+      const boundedCount = Math.max(1, Math.min(rawQuestions.length, customQuestionCount));
+      list = list.slice(0, boundedCount);
+    }
+
+    setFrozenQuestions(list);
+    setOverallSecondsLeft(Math.max(60, customOverallMinutes * 60));
+    setVisitedQuestions(list[0] ? { [list[0].id]: true } : {});
+    setCurrentIndex(0);
+    setPhase('active');
+  };
 
   const handleSelectOption = (optionIdx: number) => {
     if (phase !== 'active' || !currentQuestion) return;
@@ -182,6 +311,72 @@ export const TestEngineModal: React.FC<TestEngineModalProps> = ({
     const next: LanguageMode =
       language === 'bilingual' ? 'en' : language === 'en' ? 'hi' : 'bilingual';
     onLanguageChange(next);
+  };
+
+  // Per-question translation handler (Phase 7)
+  const handleTranslateQuestion = async (q: Question, langOverride?: TargetTranslationLang) => {
+    const targetLang = langOverride || targetTranslateLang;
+    if (langOverride) {
+      setTargetTranslateLang(langOverride);
+    }
+
+    // If already translated in the same language, toggle view
+    const existing = activeTranslations[q.id];
+    if (existing && existing.lang === targetLang && !langOverride) {
+      setShowTranslatedView((prev) => ({ ...prev, [q.id]: !prev[q.id] }));
+      return;
+    }
+
+    // Fast path for built-in verified Hindi or English fields
+    if (targetLang === 'hi' && q.question_hi && q.options_hi?.length === q.options_en.length) {
+      const payload: TranslatedPayload = {
+        lang: 'hi',
+        questionText: q.question_hi,
+        options: q.options_hi,
+        explanation: `${q.basic_hi || ''}${q.trick_hi ? `\n\nट्रिक: ${q.trick_hi}` : ''}`.trim(),
+        provider: 'verified_bilingual',
+      };
+      setActiveTranslations((prev) => ({ ...prev, [q.id]: payload }));
+      setShowTranslatedView((prev) => ({ ...prev, [q.id]: true }));
+      setTranslationError((prev) => ({ ...prev, [q.id]: '' }));
+      return;
+    }
+
+    if (targetLang === 'en' && q.question_en) {
+      const payload: TranslatedPayload = {
+        lang: 'en',
+        questionText: q.question_en,
+        options: q.options_en,
+        explanation: `${q.basic_en || ''}${q.trick_en ? `\n\nTrick: ${q.trick_en}` : ''}`.trim(),
+        provider: 'verified_bilingual',
+      };
+      setActiveTranslations((prev) => ({ ...prev, [q.id]: payload }));
+      setShowTranslatedView((prev) => ({ ...prev, [q.id]: true }));
+      setTranslationError((prev) => ({ ...prev, [q.id]: '' }));
+      return;
+    }
+
+    setTranslatingQuestionId(q.id);
+    setTranslationError((prev) => ({ ...prev, [q.id]: '' }));
+    try {
+      const res = await translateQuestionContent(q, targetLang);
+      const payload: TranslatedPayload = {
+        lang: targetLang,
+        questionText: res.questionText,
+        options: res.options,
+        explanation: res.explanation,
+        provider: res.provider,
+      };
+      setActiveTranslations((prev) => ({ ...prev, [q.id]: payload }));
+      setShowTranslatedView((prev) => ({ ...prev, [q.id]: true }));
+    } catch {
+      setTranslationError((prev) => ({
+        ...prev,
+        [q.id]: 'Translation temporarily unavailable. Tap retry.',
+      }));
+    } finally {
+      setTranslatingQuestionId(null);
+    }
   };
 
   // Summary counts for Palette & Submit Confirmation
@@ -264,19 +459,27 @@ export const TestEngineModal: React.FC<TestEngineModalProps> = ({
   }, [questions, userAnswers, marksPerCorrect, negativeMarking, marksPerUnanswered, elapsedSeconds]);
 
   const finalizeSubmission = () => {
-    if (phase === 'submitted') return;
+    if (phase === 'submitted' || isSubmittingRef.current) return;
+    isSubmittingRef.current = true;
+
+    const attemptId = `attempt-${Date.now()}`;
+    setCompletedAttemptId(attemptId);
     setShowSubmitConfirm(false);
     setShowPaletteDrawer(false);
     setPhase('submitted');
 
     const record: TestAttemptRecord = {
-      id: `attempt-${Date.now()}`,
+      id: attemptId,
+      attemptId,
+      packId: config.packId,
+      packTitle: config.title,
       testTitle: config.title,
       exam: config.exam,
       stage: config.stage,
       paper: config.paper,
       stageOrPaper: config.stageOrPaper,
       mode: activeMode,
+      timestamp: Date.now(),
       date: new Date().toLocaleString('en-IN', {
         day: '2-digit',
         month: 'short',
@@ -291,7 +494,9 @@ export const TestEngineModal: React.FC<TestEngineModalProps> = ({
       skipped: resultMetrics.skipped,
       marksPerCorrect,
       netScore: resultMetrics.netScore,
+      score: resultMetrics.netScore,
       maxScore: resultMetrics.maxScore,
+      totalMarks: resultMetrics.maxScore,
       negativeMarking,
       accuracy: resultMetrics.accuracy,
       avgSecondsPerQuestion: resultMetrics.avgSecondsPerQuestion,
@@ -300,19 +505,50 @@ export const TestEngineModal: React.FC<TestEngineModalProps> = ({
       questionIds: questions.map((q) => q.id),
       userAnswers,
       timeTakenSeconds: Math.max(1, elapsedSeconds),
+      customizationSnapshot: {
+        customizedByStudent: Boolean(rules.customizationAllowed),
+        timerType: activeTimerType,
+        overallMinutes: customOverallMinutes,
+        questionCount: questions.length,
+      },
     };
     onCompleteTest(record);
   };
 
   const handleRestartTest = () => {
+    isSubmittingRef.current = false;
+    setFeedbackSubmitted(false);
+    setFeedbackRating(0);
+    setFeedbackMessage('');
     setUserAnswers({});
     setMarkedForReview({});
     setVisitedQuestions(questions[0] ? { [questions[0].id]: true } : {});
     setCurrentIndex(0);
     setElapsedSeconds(0);
-    setOverallSecondsLeft(Math.max(60, (config.overallMinutes || 15) * 60));
+    setOverallSecondsLeft(Math.max(60, customOverallMinutes * 60));
     setSprintSecondsLeft(config.sprintSeconds || 45);
     setPhase('active');
+  };
+
+  const handleFeedbackSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (feedbackSubmitted || feedbackRating < 1) return;
+    const item: StudentFeedbackItem = {
+      id: `FB-${Date.now()}`,
+      deviceId: studentState.deviceId,
+      studentName: studentState.studentName || 'Student Aspirant',
+      attemptId: completedAttemptId || `attempt-${Date.now()}`,
+      packTitle: config.title,
+      rating: feedbackRating as 1 | 2 | 3 | 4 | 5,
+      category: feedbackCategory,
+      message: feedbackMessage.trim() || `Rated ${feedbackRating}/5 stars for ${config.title}`,
+      status: 'new',
+      createdAt: Date.now(),
+    };
+    setFeedbackSubmitted(true);
+    if (onSubmitFeedback) {
+      onSubmitFeedback(item);
+    }
   };
 
   const formatMMSS = (secs: number) => {
@@ -321,7 +557,7 @@ export const TestEngineModal: React.FC<TestEngineModalProps> = ({
     return `${String(mins).padStart(2, '0')}:${String(rem).padStart(2, '0')}`;
   };
 
-  if (!questions.length) {
+  if (!rawQuestions.length) {
     return (
       <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4 backdrop-blur-md">
         <div
@@ -346,9 +582,13 @@ export const TestEngineModal: React.FC<TestEngineModalProps> = ({
   }
 
   // ============================================================================
-  // PHASE 1: PRE-TEST SUMMARY & INSTRUCTIONS SCREEN
+  // PHASE 1: PRE-TEST SUMMARY, CUSTOMIZATION ENFORCEMENT & INSTRUCTIONS SCREEN
   // ============================================================================
   if (phase === 'instructions') {
+    const canSwitchMode = rules.customizationAllowed && rules.allowModeSwitch;
+    const canChangeTimer = rules.customizationAllowed && rules.allowTimerChange;
+    const canChangeQCount = rules.customizationAllowed && rules.allowQuestionCountChange;
+
     return (
       <div
         className={`fixed inset-0 z-50 flex flex-col overflow-y-auto ${
@@ -376,7 +616,17 @@ export const TestEngineModal: React.FC<TestEngineModalProps> = ({
             <span className="text-xs font-semibold uppercase tracking-wider text-indigo-400">
               Pre-Test Instructions
             </span>
-            <div className="w-16" />
+            <button
+              onClick={onGoHome || onClose}
+              className={`inline-flex min-h-[44px] items-center gap-1.5 rounded-xl px-3 py-2 text-xs font-semibold transition ${
+                isDark
+                  ? 'text-slate-300 hover:bg-white/5 hover:text-white'
+                  : 'text-slate-700 hover:bg-slate-100'
+              }`}
+            >
+              <Home className="h-4 w-4" />
+              Home
+            </button>
           </div>
         </header>
 
@@ -387,12 +637,34 @@ export const TestEngineModal: React.FC<TestEngineModalProps> = ({
               isDark ? 'surface-card-dark' : 'surface-card-light'
             }`}
           >
-            {/* Exam & Stage Breadcrumb */}
-            <p className="text-xs font-semibold uppercase tracking-wider text-indigo-400">
-              {config.exam}
-              {config.stage ? ` · ${config.stage}` : ''}
-              {config.paper ? ` · ${config.paper}` : ''}
-            </p>
+            {/* Exam & Stage Breadcrumb + Admin Customization Badge */}
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <p className="text-xs font-semibold uppercase tracking-wider text-indigo-400">
+                {config.exam}
+                {config.stage ? ` · ${config.stage}` : ''}
+                {config.paper ? ` · ${config.paper}` : ''}
+              </p>
+              <span
+                className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-[11px] font-semibold ${
+                  rules.customizationAllowed
+                    ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-400'
+                    : 'border-amber-500/30 bg-amber-500/10 text-amber-400'
+                }`}
+              >
+                {rules.customizationAllowed ? (
+                  <>
+                    <Sliders className="h-3.5 w-3.5" />
+                    Customization Allowed
+                  </>
+                ) : (
+                  <>
+                    <Lock className="h-3.5 w-3.5" />
+                    Official Fixed Parameters (Locked by Admin)
+                  </>
+                )}
+              </span>
+            </div>
+
             <h1 className="mt-1.5 text-xl font-bold tracking-tight sm:text-2xl">{config.title}</h1>
 
             {/* Key Test Specs Grid */}
@@ -407,7 +679,9 @@ export const TestEngineModal: React.FC<TestEngineModalProps> = ({
                 }`}
               >
                 <p className="text-xs text-slate-400">Questions</p>
-                <p className="mt-1 text-lg font-bold tabular-nums">{questions.length} Qs</p>
+                <p className="mt-1 text-lg font-bold tabular-nums">
+                  {canChangeQCount ? customQuestionCount : rawQuestions.length} Qs
+                </p>
               </div>
               <div
                 className={`rounded-xl border p-3.5 ${
@@ -416,10 +690,10 @@ export const TestEngineModal: React.FC<TestEngineModalProps> = ({
               >
                 <p className="text-xs text-slate-400">Duration</p>
                 <p className="mt-1 text-lg font-bold tabular-nums">
-                  {config.timerType === 'overall'
-                    ? `${config.overallMinutes} Mins`
-                    : config.timerType === 'sprint'
-                    ? `${config.sprintSeconds}s / Q`
+                  {activeTimerType === 'overall'
+                    ? `${customOverallMinutes} Mins`
+                    : activeTimerType === 'sprint'
+                    ? `${config.sprintSeconds || 45}s / Q`
                     : 'Untimed'}
                 </p>
               </div>
@@ -430,7 +704,9 @@ export const TestEngineModal: React.FC<TestEngineModalProps> = ({
               >
                 <p className="text-xs text-slate-400">Maximum Marks</p>
                 <p className="mt-1 text-lg font-bold tabular-nums">
-                  {(questions.length * marksPerCorrect).toFixed(1)}
+                  {(
+                    (canChangeQCount ? customQuestionCount : rawQuestions.length) * marksPerCorrect
+                  ).toFixed(1)}
                 </p>
               </div>
               <div
@@ -449,16 +725,24 @@ export const TestEngineModal: React.FC<TestEngineModalProps> = ({
               </div>
             </div>
 
-            {/* Choose Test Mode */}
+            {/* Choose Test Mode (Respects Admin Customization Rules) */}
             <div className="mt-6">
-              <label className="block text-xs font-semibold uppercase tracking-wider text-slate-400">
-                Select Attempt Mode
-              </label>
+              <div className="flex items-center justify-between">
+                <label className="block text-xs font-semibold uppercase tracking-wider text-slate-400">
+                  Select Attempt Mode
+                </label>
+                {!canSwitchMode && (
+                  <span className="text-[11px] font-medium text-amber-400">
+                    Mode fixed by Admin for this exam pack
+                  </span>
+                )}
+              </div>
               <div className="mt-2.5 grid grid-cols-1 gap-3 sm:grid-cols-2">
                 <button
                   type="button"
-                  onClick={() => setActiveMode('exam_hall')}
-                  className={`flex min-h-[64px] items-start gap-3 rounded-xl border p-3.5 text-left transition ${
+                  disabled={!canSwitchMode && activeMode !== 'exam_hall'}
+                  onClick={() => canSwitchMode && setActiveMode('exam_hall')}
+                  className={`flex min-h-[64px] items-start gap-3 rounded-xl border p-3.5 text-left transition disabled:opacity-45 ${
                     activeMode === 'exam_hall'
                       ? 'border-indigo-500 bg-indigo-500/10'
                       : isDark
@@ -481,8 +765,9 @@ export const TestEngineModal: React.FC<TestEngineModalProps> = ({
 
                 <button
                   type="button"
-                  onClick={() => setActiveMode('practice')}
-                  className={`flex min-h-[64px] items-start gap-3 rounded-xl border p-3.5 text-left transition ${
+                  disabled={!canSwitchMode && activeMode !== 'practice'}
+                  onClick={() => canSwitchMode && setActiveMode('practice')}
+                  className={`flex min-h-[64px] items-start gap-3 rounded-xl border p-3.5 text-left transition disabled:opacity-45 ${
                     activeMode === 'practice'
                       ? 'border-emerald-500 bg-emerald-500/10'
                       : isDark
@@ -505,10 +790,104 @@ export const TestEngineModal: React.FC<TestEngineModalProps> = ({
               </div>
             </div>
 
+            {/* Optional Student Customization Controls (Only shown when Admin allows) */}
+            {rules.customizationAllowed && (canChangeTimer || canChangeQCount) && (
+              <div
+                className={`mt-6 rounded-xl border p-4 ${
+                  isDark ? 'border-indigo-500/25 bg-indigo-500/[0.04]' : 'border-indigo-200 bg-indigo-50/50'
+                }`}
+              >
+                <div className="flex items-center justify-between">
+                  <p className="flex items-center gap-1.5 text-xs font-bold uppercase tracking-wider text-indigo-400">
+                    <Sliders className="h-3.5 w-3.5" />
+                    Student Test Customization Options
+                  </p>
+                  <label className="inline-flex cursor-pointer items-center gap-2 text-xs font-medium">
+                    <input
+                      type="checkbox"
+                      checked={shouldRandomize}
+                      onChange={(e) => setShouldRandomize(e.target.checked)}
+                      className="h-4 w-4 rounded accent-indigo-600"
+                    />
+                    Shuffle Question Order
+                  </label>
+                </div>
+
+                <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
+                  {canChangeTimer && (
+                    <div>
+                      <label className="block text-xs font-medium text-slate-400">
+                        Timer Mode & Duration (Mins)
+                      </label>
+                      <div className="mt-1.5 flex gap-2">
+                        <select
+                          value={activeTimerType}
+                          onChange={(e) =>
+                            setActiveTimerType(e.target.value as 'overall' | 'sprint' | 'none')
+                          }
+                          className={`min-h-[40px] flex-1 rounded-xl border px-3 text-xs font-semibold ${
+                            isDark
+                              ? 'border-white/10 bg-[#0A0E17] text-slate-100'
+                              : 'border-slate-300 bg-white text-slate-800'
+                          }`}
+                        >
+                          <option value="overall">Overall Exam Countdown</option>
+                          <option value="sprint">Per-Question Sprint Timer</option>
+                          <option value="none">Untimed Practice</option>
+                        </select>
+                        {activeTimerType === 'overall' && (
+                          <input
+                            type="number"
+                            min={1}
+                            max={180}
+                            value={customOverallMinutes}
+                            onChange={(e) =>
+                              setCustomOverallMinutes(
+                                Math.max(1, Math.min(180, Number(e.target.value) || 15))
+                              )
+                            }
+                            className={`min-h-[40px] w-20 rounded-xl border px-2.5 text-center text-xs font-bold ${
+                              isDark
+                                ? 'border-white/10 bg-[#0A0E17] text-slate-100'
+                                : 'border-slate-300 bg-white text-slate-800'
+                            }`}
+                          />
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                  {canChangeQCount && (
+                    <div>
+                      <label className="block text-xs font-medium text-slate-400">
+                        Number of Questions (Max {rawQuestions.length})
+                      </label>
+                      <input
+                        type="number"
+                        min={1}
+                        max={rawQuestions.length}
+                        value={customQuestionCount}
+                        onChange={(e) =>
+                          setCustomQuestionCount(
+                            Math.max(1, Math.min(rawQuestions.length, Number(e.target.value) || 1))
+                          )
+                        }
+                        className={`mt-1.5 min-h-[40px] w-full rounded-xl border px-3 text-xs font-bold ${
+                          isDark
+                            ? 'border-white/10 bg-[#0A0E17] text-slate-100'
+                            : 'border-slate-300 bg-white text-slate-800'
+                        }`}
+                      />
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
             {/* Choose Default Question Language */}
             <div className="mt-6">
               <label className="block text-xs font-semibold uppercase tracking-wider text-slate-400">
-                Question Paper Language (Can be toggled anytime during test)
+                Question Paper Language (Can be toggled or translated anytime during test)
               </label>
               <div className="mt-2.5 grid grid-cols-3 gap-2.5">
                 {(
@@ -558,13 +937,7 @@ export const TestEngineModal: React.FC<TestEngineModalProps> = ({
                 <li className="flex items-start gap-2">
                   <span className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-indigo-400" />
                   <span>
-                    Unanswered / skipped questions carry <strong>{marksPerUnanswered} marks</strong>. You can clear a selected option anytime using <strong>Clear Response</strong>.
-                  </span>
-                </li>
-                <li className="flex items-start gap-2">
-                  <span className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-indigo-400" />
-                  <span>
-                    Switching between English and Hindi (`अ/A`) during the test will <strong>never reset your timer or answers</strong>.
+                    Use the <strong>Translate</strong> button on any question to read it in Hindi, English, Bengali, Marathi, Tamil, Telugu, or Urdu without losing your selected answer or timer.
                   </span>
                 </li>
               </ul>
@@ -585,7 +958,7 @@ export const TestEngineModal: React.FC<TestEngineModalProps> = ({
               </button>
               <button
                 type="button"
-                onClick={() => setPhase('active')}
+                onClick={handleStartTestWithSnapshot}
                 className="inline-flex min-h-[48px] flex-1 items-center justify-center gap-2 rounded-xl bg-indigo-600 px-6 py-3 text-base font-bold text-white shadow-lg shadow-indigo-600/25 transition hover:bg-indigo-500 sm:flex-initial sm:min-w-[240px]"
               >
                 Start Test Now
@@ -599,7 +972,7 @@ export const TestEngineModal: React.FC<TestEngineModalProps> = ({
   }
 
   // ============================================================================
-  // PHASE 3: STRUCTURED RESULTS & QUESTION REVIEW SCREEN
+  // PHASE 3: STRUCTURED RESULTS, CLEAR NAVIGATION, FEEDBACK & QUESTION REVIEW
   // ============================================================================
   if (phase === 'submitted') {
     const filteredReviewQuestions = questions.filter((q) => {
@@ -618,20 +991,34 @@ export const TestEngineModal: React.FC<TestEngineModalProps> = ({
           isDark ? 'bg-[#0A0E17] text-slate-100' : 'bg-[#F8FAFC] text-slate-900'
         }`}
       >
-        {/* Sticky Result Header */}
+        {/* Sticky Result Navigation Header (Phase 1 Fix: Always Accessible Home/Back/Review) */}
         <header
           className={`sticky top-0 z-20 border-b px-4 py-3 ${
             isDark ? 'liquid-glass-dark' : 'liquid-glass-light'
           }`}
         >
-          <div className="mx-auto flex max-w-4xl items-center justify-between gap-3">
-            <div>
-              <p className="text-[11px] font-semibold uppercase tracking-wider text-indigo-400">
-                Performance Report · {config.exam}
-              </p>
-              <h1 className="truncate text-sm font-bold sm:text-base">{config.title}</h1>
+          <div className="mx-auto flex max-w-4xl items-center justify-between gap-2">
+            <div className="flex min-w-0 items-center gap-2.5">
+              <button
+                onClick={onGoHome || onClose}
+                className={`inline-flex min-h-[40px] items-center gap-1.5 rounded-xl border px-3 py-1.5 text-xs font-semibold transition ${
+                  isDark
+                    ? 'border-white/15 bg-white/5 text-slate-200 hover:bg-white/10'
+                    : 'border-slate-300 bg-white text-slate-700 hover:bg-slate-100'
+                }`}
+                title="Back to Home Dashboard"
+              >
+                <ArrowLeft className="h-4 w-4" />
+                <span className="hidden sm:inline">Dashboard</span>
+              </button>
+              <div className="min-w-0">
+                <p className="text-[11px] font-semibold uppercase tracking-wider text-indigo-400">
+                  Result Summary · {config.exam}
+                </p>
+                <h1 className="truncate text-sm font-bold sm:text-base">{config.title}</h1>
+              </div>
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex shrink-0 items-center gap-2">
               <button
                 onClick={cycleLanguage}
                 className={`min-h-[40px] rounded-xl border px-3 py-1.5 text-xs font-semibold ${
@@ -643,17 +1030,18 @@ export const TestEngineModal: React.FC<TestEngineModalProps> = ({
                 अ/A · {language === 'bilingual' ? 'Bi' : language.toUpperCase()}
               </button>
               <button
-                onClick={onClose}
-                className="min-h-[40px] rounded-xl bg-indigo-600 px-4 py-1.5 text-xs font-semibold text-white hover:bg-indigo-500"
+                onClick={onGoHome || onClose}
+                className="inline-flex min-h-[40px] items-center gap-1.5 rounded-xl bg-indigo-600 px-3.5 py-1.5 text-xs font-semibold text-white hover:bg-indigo-500"
               >
-                Done
+                <Home className="h-3.5 w-3.5" />
+                Home
               </button>
             </div>
           </div>
         </header>
 
         <main className="mx-auto w-full max-w-4xl flex-1 space-y-6 px-4 py-6">
-          {/* Score Card Hero */}
+          {/* Score Card Hero + Post-Submission Action Bar */}
           <section
             className={`rounded-2xl p-5 sm:p-6 ${
               isDark ? 'surface-card-dark' : 'surface-card-light'
@@ -663,7 +1051,7 @@ export const TestEngineModal: React.FC<TestEngineModalProps> = ({
               <div>
                 <span className="inline-flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-emerald-400">
                   <Trophy className="h-4 w-4" />
-                  Test Completed
+                  Test Submitted Successfully
                 </span>
                 <div className="mt-1 flex items-baseline gap-2">
                   <span className="text-3xl font-extrabold tabular-nums sm:text-4xl">
@@ -680,23 +1068,54 @@ export const TestEngineModal: React.FC<TestEngineModalProps> = ({
                 </p>
               </div>
 
-              <div className="flex flex-wrap gap-2.5">
+              {/* Phase 1 Post-Test Navigation Actions */}
+              <div className="flex flex-wrap gap-2">
                 <button
+                  type="button"
+                  onClick={() =>
+                    reviewSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+                  }
+                  className={`inline-flex min-h-[44px] items-center gap-2 rounded-xl border px-3.5 py-2 text-xs font-semibold transition ${
+                    isDark
+                      ? 'border-indigo-500/40 bg-indigo-500/15 text-indigo-300 hover:bg-indigo-500/25'
+                      : 'border-indigo-200 bg-indigo-50 text-indigo-700 hover:bg-indigo-100'
+                  }`}
+                >
+                  Review Answers
+                </button>
+                <button
+                  type="button"
                   onClick={handleRestartTest}
-                  className={`inline-flex min-h-[44px] items-center gap-2 rounded-xl border px-4 py-2 text-xs font-semibold transition ${
+                  className={`inline-flex min-h-[44px] items-center gap-2 rounded-xl border px-3.5 py-2 text-xs font-semibold transition ${
                     isDark
                       ? 'border-white/15 bg-white/5 text-slate-200 hover:bg-white/10'
                       : 'border-slate-300 bg-white text-slate-700 hover:bg-slate-50'
                   }`}
                 >
                   <RotateCcw className="h-4 w-4" />
-                  Re-Attempt Test
+                  Retry Test
                 </button>
+                {onStartNextTest && (
+                  <button
+                    type="button"
+                    onClick={onStartNextTest}
+                    className={`inline-flex min-h-[44px] items-center gap-1.5 rounded-xl border px-3.5 py-2 text-xs font-semibold transition ${
+                      isDark
+                        ? 'border-emerald-500/40 bg-emerald-500/15 text-emerald-300 hover:bg-emerald-500/25'
+                        : 'border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100'
+                    }`}
+                  >
+                    Next Test
+                    <ArrowRight className="h-3.5 w-3.5" />
+                  </button>
+                )}
                 <button
-                  onClick={onClose}
+                  type="button"
+                  onClick={onGoHome || onClose}
                   className="inline-flex min-h-[44px] items-center gap-2 rounded-xl bg-indigo-600 px-4 py-2 text-xs font-semibold text-white hover:bg-indigo-500"
                 >
-                  Back to Exams
+                  <Home className="h-4 w-4" />
+                  Home / Dashboard
                 </button>
               </div>
             </div>
@@ -761,8 +1180,91 @@ export const TestEngineModal: React.FC<TestEngineModalProps> = ({
             </div>
           </section>
 
+          {/* Phase 4: Optional Student Feedback Card */}
+          <section
+            className={`rounded-2xl p-5 ${
+              isDark ? 'surface-card-dark' : 'surface-card-light'
+            }`}
+          >
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <MessageSquarePlus className="h-4 w-4 text-indigo-400" />
+                <h2 className="text-sm font-bold">Share Optional Test Feedback</h2>
+              </div>
+              <span className="text-[11px] text-slate-400">Optional · Helps improve Zyvra</span>
+            </div>
+
+            {feedbackSubmitted ? (
+              <div className="mt-3 flex items-center gap-2 rounded-xl border border-emerald-500/30 bg-emerald-500/10 p-3 text-xs font-semibold text-emerald-400">
+                <CheckCircle2 className="h-4 w-4 shrink-0" />
+                Thank you! Your feedback has been recorded for the Academic Review team.
+              </div>
+            ) : (
+              <form onSubmit={handleFeedbackSubmit} className="mt-3 space-y-3">
+                <div className="flex flex-wrap items-center gap-4">
+                  <div className="flex items-center gap-1">
+                    {[1, 2, 3, 4, 5].map((star) => (
+                      <button
+                        key={star}
+                        type="button"
+                        onClick={() => setFeedbackRating(star)}
+                        className="rounded-lg p-1.5 transition hover:scale-110"
+                        title={`Rate ${star} Star${star > 1 ? 's' : ''}`}
+                      >
+                        <Star
+                          className={`h-5 w-5 ${
+                            star <= feedbackRating
+                              ? 'fill-amber-400 text-amber-400'
+                              : 'text-slate-500'
+                          }`}
+                        />
+                      </button>
+                    ))}
+                  </div>
+
+                  <select
+                    value={feedbackCategory}
+                    onChange={(e) => setFeedbackCategory(e.target.value as any)}
+                    className={`min-h-[38px] rounded-xl border px-3 text-xs font-semibold ${
+                      isDark
+                        ? 'border-white/10 bg-[#0A0E17] text-slate-200'
+                        : 'border-slate-200 bg-slate-50 text-slate-800'
+                    }`}
+                  >
+                    <option value="test_quality">Question & Explanation Quality</option>
+                    <option value="question_error">Report Question / Option Error</option>
+                    <option value="translation">Translation Accuracy</option>
+                    <option value="ui_ux">Mobile App Experience</option>
+                    <option value="overall_experience">Overall Experience</option>
+                  </select>
+                </div>
+
+                <div className="flex flex-col gap-2 sm:flex-row">
+                  <input
+                    type="text"
+                    value={feedbackMessage}
+                    onChange={(e) => setFeedbackMessage(e.target.value)}
+                    placeholder="Optional comments or question number to review..."
+                    className={`min-h-[42px] flex-1 rounded-xl border px-3.5 text-xs ${
+                      isDark
+                        ? 'border-white/10 bg-[#0A0E17] text-slate-100 placeholder:text-slate-500'
+                        : 'border-slate-200 bg-white text-slate-900 placeholder:text-slate-400'
+                    }`}
+                  />
+                  <button
+                    type="submit"
+                    disabled={feedbackRating < 1}
+                    className="min-h-[42px] rounded-xl bg-indigo-600 px-4 py-2 text-xs font-bold text-white transition hover:bg-indigo-500 disabled:opacity-40"
+                  >
+                    Submit Feedback
+                  </button>
+                </div>
+              </form>
+            )}
+          </section>
+
           {/* Filterable Solutions Review */}
-          <section className="space-y-4">
+          <section ref={reviewSectionRef} className="space-y-4">
             <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
               <h2 className="text-base font-bold">
                 Detailed Solutions ({filteredReviewQuestions.length})
@@ -808,6 +1310,8 @@ export const TestEngineModal: React.FC<TestEngineModalProps> = ({
                 const isSkipped = userAns === undefined || userAns === null;
                 const isCorrect = !isSkipped && userAns === q.correctIndex;
                 const isBookmarked = studentState.bookmarkedQuestionIds.includes(q.id);
+                const qTrans = activeTranslations[q.id];
+                const isShowingTrans = Boolean(showTranslatedView[q.id] && qTrans);
 
                 return (
                   <article
@@ -852,34 +1356,70 @@ export const TestEngineModal: React.FC<TestEngineModalProps> = ({
                         </div>
                       </div>
 
-                      <button
-                        onClick={() => onToggleBookmarkQuestion(q.id)}
-                        className={`inline-flex min-h-[40px] min-w-[40px] items-center justify-center rounded-xl border transition ${
-                          isBookmarked
-                            ? 'border-amber-500/40 bg-amber-500/15 text-amber-400'
-                            : isDark
-                            ? 'border-white/10 text-slate-400 hover:bg-white/5'
-                            : 'border-slate-200 text-slate-500 hover:bg-slate-100'
-                        }`}
-                        title="Bookmark Question"
-                      >
-                        {isBookmarked ? (
-                          <BookmarkCheck className="h-4 w-4" />
-                        ) : (
-                          <Bookmark className="h-4 w-4" />
-                        )}
-                      </button>
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => handleTranslateQuestion(q)}
+                          className={`inline-flex min-h-[38px] items-center gap-1.5 rounded-xl border px-2.5 py-1 text-xs font-semibold transition ${
+                            isShowingTrans
+                              ? 'border-indigo-500/40 bg-indigo-500/15 text-indigo-300'
+                              : isDark
+                              ? 'border-white/10 text-slate-300 hover:bg-white/5'
+                              : 'border-slate-200 text-slate-700 hover:bg-slate-100'
+                          }`}
+                        >
+                          <Languages className="h-3.5 w-3.5" />
+                          {translatingQuestionId === q.id
+                            ? 'Translating...'
+                            : isShowingTrans
+                            ? 'Show Original'
+                            : 'Translate'}
+                        </button>
+
+                        <button
+                          onClick={() => onToggleBookmarkQuestion(q.id)}
+                          className={`inline-flex min-h-[38px] min-w-[38px] items-center justify-center rounded-xl border transition ${
+                            isBookmarked
+                              ? 'border-amber-500/40 bg-amber-500/15 text-amber-400'
+                              : isDark
+                              ? 'border-white/10 text-slate-400 hover:bg-white/5'
+                              : 'border-slate-200 text-slate-500 hover:bg-slate-100'
+                          }`}
+                          title="Bookmark Question"
+                        >
+                          {isBookmarked ? (
+                            <BookmarkCheck className="h-4 w-4" />
+                          ) : (
+                            <Bookmark className="h-4 w-4" />
+                          )}
+                        </button>
+                      </div>
                     </div>
 
                     {/* Question Stem */}
                     <div className="reading-prose mt-3 space-y-1.5 text-sm sm:text-base">
-                      {(language === 'en' || language === 'bilingual') && (
-                        <p className="font-medium">{q.question_en}</p>
-                      )}
-                      {(language === 'hi' || language === 'bilingual') && (
-                        <p className={language === 'bilingual' ? 'text-slate-400' : 'font-medium'}>
-                          {q.question_hi}
-                        </p>
+                      {isShowingTrans && qTrans ? (
+                        <div className="rounded-xl border border-indigo-500/30 bg-indigo-500/10 p-3">
+                          <p className="text-[11px] font-bold uppercase tracking-wider text-indigo-400">
+                            Translated ({qTrans.lang.toUpperCase()})
+                          </p>
+                          <p className="mt-1 font-medium">{qTrans.questionText}</p>
+                        </div>
+                      ) : (
+                        <>
+                          {(language === 'en' || language === 'bilingual') && (
+                            <p className="font-medium">{q.question_en}</p>
+                          )}
+                          {(language === 'hi' || language === 'bilingual') && (
+                            <p
+                              className={
+                                language === 'bilingual' ? 'text-slate-400' : 'font-medium'
+                              }
+                            >
+                              {q.question_hi}
+                            </p>
+                          )}
+                        </>
                       )}
                     </div>
 
@@ -887,6 +1427,10 @@ export const TestEngineModal: React.FC<TestEngineModalProps> = ({
                     <div className="mt-4 grid grid-cols-1 gap-2 sm:grid-cols-2">
                       {q.options_en.map((optEn, optIdx) => {
                         const optHi = q.options_hi[optIdx] || optEn;
+                        const transOpt =
+                          isShowingTrans && qTrans?.options?.[optIdx]
+                            ? qTrans.options[optIdx]
+                            : null;
                         const isRightOpt = optIdx === q.correctIndex;
                         const isUserPicked = userAns === optIdx;
 
@@ -907,9 +1451,15 @@ export const TestEngineModal: React.FC<TestEngineModalProps> = ({
                               {String.fromCharCode(65 + optIdx)}
                             </span>
                             <div className="flex-1">
-                              {(language === 'en' || language === 'bilingual') && <p>{optEn}</p>}
-                              {(language === 'hi' || language === 'bilingual') && (
-                                <p className="text-xs opacity-85">{optHi}</p>
+                              {transOpt ? (
+                                <p>{transOpt}</p>
+                              ) : (
+                                <>
+                                  {(language === 'en' || language === 'bilingual') && <p>{optEn}</p>}
+                                  {(language === 'hi' || language === 'bilingual') && (
+                                    <p className="text-xs opacity-85">{optHi}</p>
+                                  )}
+                                </>
                               )}
                             </div>
                             {isRightOpt && (
@@ -978,7 +1528,7 @@ export const TestEngineModal: React.FC<TestEngineModalProps> = ({
   }
 
   // ============================================================================
-  // PHASE 2: ACTIVE DISTRACTION-FREE TEST SCREEN
+  // PHASE 2: ACTIVE DISTRACTION-FREE TEST SCREEN (WITH IN-TEST TRANSLATION)
   // ============================================================================
   const selectedOpt = currentQuestion ? userAnswers[currentQuestion.id] : null;
   const isCurrentAnswered = selectedOpt !== undefined && selectedOpt !== null;
@@ -987,6 +1537,12 @@ export const TestEngineModal: React.FC<TestEngineModalProps> = ({
     ? studentState.bookmarkedQuestionIds.includes(currentQuestion.id)
     : false;
   const showInstantFeedback = activeMode === 'practice' && isCurrentAnswered;
+
+  const currentTranslation = currentQuestion ? activeTranslations[currentQuestion.id] : undefined;
+  const isShowingCurrentTranslation = currentQuestion
+    ? Boolean(showTranslatedView[currentQuestion.id] && currentTranslation)
+    : false;
+  const currentTranslateError = currentQuestion ? translationError[currentQuestion.id] : '';
 
   return (
     <div
@@ -1001,7 +1557,7 @@ export const TestEngineModal: React.FC<TestEngineModalProps> = ({
         }`}
       >
         <div className="mx-auto flex max-w-4xl items-center justify-between gap-2">
-          {/* Left: Exit + Title */}
+          {/* Left: Back/Exit + Title */}
           <div className="flex min-w-0 items-center gap-2">
             <button
               type="button"
@@ -1013,7 +1569,7 @@ export const TestEngineModal: React.FC<TestEngineModalProps> = ({
               }`}
               title="Exit Test"
             >
-              <X className="h-4 w-4" />
+              <ArrowLeft className="h-4 w-4" />
             </button>
             <div className="min-w-0">
               <p className="truncate text-xs font-bold sm:text-sm">{config.title}</p>
@@ -1027,11 +1583,11 @@ export const TestEngineModal: React.FC<TestEngineModalProps> = ({
 
           {/* Right: Timer, Language Toggle, Palette Drawer Trigger */}
           <div className="flex shrink-0 items-center gap-2">
-            {config.timerType !== 'none' && (
+            {activeTimerType !== 'none' && (
               <div
                 className={`inline-flex min-h-[42px] items-center gap-1.5 rounded-xl border px-3 py-1.5 text-xs font-bold tabular-nums sm:text-sm ${
-                  (config.timerType === 'overall' && overallSecondsLeft < 60) ||
-                  (config.timerType === 'sprint' && sprintSecondsLeft <= 10)
+                  (activeTimerType === 'overall' && overallSecondsLeft < 60) ||
+                  (activeTimerType === 'sprint' && sprintSecondsLeft <= 10)
                     ? 'border-rose-500/50 bg-rose-500/15 text-rose-400'
                     : isDark
                     ? 'border-white/10 bg-white/[0.04] text-slate-100'
@@ -1039,7 +1595,7 @@ export const TestEngineModal: React.FC<TestEngineModalProps> = ({
                 }`}
               >
                 <Clock className="h-3.5 w-3.5 text-indigo-400" />
-                {config.timerType === 'overall'
+                {activeTimerType === 'overall'
                   ? formatMMSS(overallSecondsLeft)
                   : `${sprintSecondsLeft}s`}
               </div>
@@ -1053,7 +1609,7 @@ export const TestEngineModal: React.FC<TestEngineModalProps> = ({
                   ? 'border-white/10 bg-white/[0.04] text-slate-200 hover:bg-white/10'
                   : 'border-slate-200 bg-white text-slate-800 hover:bg-slate-100'
               }`}
-              title="Switch Question Language"
+              title="Switch Question Paper Language"
             >
               अ/A · {language === 'bilingual' ? 'Bi' : language.toUpperCase()}
             </button>
@@ -1080,7 +1636,7 @@ export const TestEngineModal: React.FC<TestEngineModalProps> = ({
       {/* Scrollable Question Workspace */}
       {currentQuestion && (
         <main className="mx-auto w-full max-w-3xl flex-1 overflow-y-auto px-4 py-5 sm:px-6 sm:py-6">
-          {/* Question Number + Metadata + Bookmark/Review Actions */}
+          {/* Question Number + Metadata + Per-Question Translate + Bookmark */}
           <div className="flex flex-wrap items-center justify-between gap-2 border-b pb-3.5 border-white/10">
             <div className="flex flex-wrap items-center gap-2">
               <span className="rounded-lg bg-indigo-600 px-2.5 py-1 text-xs font-bold text-white tabular-nums">
@@ -1094,7 +1650,7 @@ export const TestEngineModal: React.FC<TestEngineModalProps> = ({
               </span>
             </div>
 
-            <div className="flex items-center gap-2 text-xs">
+            <div className="flex flex-wrap items-center gap-2 text-xs">
               <span className="tabular-nums text-slate-400">
                 <strong className="text-emerald-400">+{marksPerCorrect}</strong>
                 {' / '}
@@ -1103,10 +1659,52 @@ export const TestEngineModal: React.FC<TestEngineModalProps> = ({
                 </strong>
               </span>
 
+              {/* Phase 7: Per-Question Translate Button */}
+              <div className="relative flex items-center gap-1">
+                <button
+                  type="button"
+                  onClick={() => handleTranslateQuestion(currentQuestion)}
+                  disabled={translatingQuestionId === currentQuestion.id}
+                  className={`inline-flex min-h-[38px] items-center gap-1.5 rounded-xl border px-3 py-1.5 text-xs font-semibold transition ${
+                    isShowingCurrentTranslation
+                      ? 'border-indigo-500 bg-indigo-600 text-white'
+                      : isDark
+                      ? 'border-indigo-500/30 bg-indigo-500/10 text-indigo-300 hover:bg-indigo-500/20'
+                      : 'border-indigo-200 bg-indigo-50 text-indigo-700 hover:bg-indigo-100'
+                  }`}
+                  title="Translate this question into your preferred language"
+                >
+                  <Languages className="h-3.5 w-3.5" />
+                  <span>
+                    {translatingQuestionId === currentQuestion.id
+                      ? 'Translating...'
+                      : isShowingCurrentTranslation
+                      ? `Original (${currentTranslation?.lang.toUpperCase()})`
+                      : `Translate (${
+                          TRANSLATION_LANGUAGES.find((l) => l.id === targetTranslateLang)?.native ||
+                          'हिन्दी'
+                        })`}
+                  </span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setShowTranslateSelector((prev) => !prev)}
+                  className={`inline-flex min-h-[38px] items-center justify-center rounded-xl border px-2 text-xs font-semibold transition ${
+                    isDark
+                      ? 'border-white/10 bg-white/[0.04] text-slate-300 hover:bg-white/10'
+                      : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-100'
+                  }`}
+                  title="Choose Translation Language"
+                >
+                  <Globe className="h-3.5 w-3.5" />
+                </button>
+              </div>
+
               <button
                 type="button"
                 onClick={() => onToggleBookmarkQuestion(currentQuestion.id)}
-                className={`inline-flex min-h-[40px] min-w-[40px] items-center justify-center rounded-xl border transition ${
+                className={`inline-flex min-h-[38px] min-w-[38px] items-center justify-center rounded-xl border transition ${
                   isCurrentBookmarked
                     ? 'border-amber-500/40 bg-amber-500/15 text-amber-400'
                     : isDark
@@ -1124,25 +1722,109 @@ export const TestEngineModal: React.FC<TestEngineModalProps> = ({
             </div>
           </div>
 
+          {/* Language Picker Bar for Per-Question Translation (Phase 7) */}
+          {showTranslateSelector && (
+            <div
+              className={`mt-3 flex flex-wrap items-center justify-between gap-2 rounded-xl border p-2.5 ${
+                isDark ? 'border-indigo-500/30 bg-[#111827]' : 'border-indigo-200 bg-indigo-50/70'
+              }`}
+            >
+              <span className="text-[11px] font-bold uppercase tracking-wider text-indigo-400">
+                Translate Question To:
+              </span>
+              <div className="flex flex-wrap gap-1.5">
+                {TRANSLATION_LANGUAGES.map((langItem) => (
+                  <button
+                    key={langItem.id}
+                    type="button"
+                    onClick={() => {
+                      setShowTranslateSelector(false);
+                      handleTranslateQuestion(currentQuestion, langItem.id);
+                    }}
+                    className={`rounded-lg px-2.5 py-1 text-xs font-semibold transition ${
+                      targetTranslateLang === langItem.id
+                        ? 'bg-indigo-600 text-white'
+                        : isDark
+                        ? 'bg-white/5 text-slate-300 hover:bg-white/10'
+                        : 'bg-white text-slate-700 hover:bg-slate-100'
+                    }`}
+                  >
+                    {langItem.native} ({langItem.label})
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Translation Error Retry Bar */}
+          {currentTranslateError && (
+            <div className="mt-3 flex items-center justify-between rounded-xl border border-rose-500/30 bg-rose-500/10 px-3.5 py-2 text-xs text-rose-300">
+              <span>{currentTranslateError}</span>
+              <button
+                type="button"
+                onClick={() => handleTranslateQuestion(currentQuestion, targetTranslateLang)}
+                className="inline-flex items-center gap-1 font-bold underline"
+              >
+                <RefreshCw className="h-3 w-3" /> Retry
+              </button>
+            </div>
+          )}
+
           {/* Question Statement */}
           <div className="reading-prose mt-5 space-y-2.5">
-            {(language === 'en' || language === 'bilingual') && (
-              <p className="text-base font-semibold leading-relaxed sm:text-lg">
-                {currentQuestion.question_en}
-              </p>
-            )}
-            {(language === 'hi' || language === 'bilingual') && (
-              <p
-                className={`text-base leading-relaxed sm:text-lg ${
-                  language === 'bilingual'
-                    ? isDark
-                      ? 'text-slate-300'
-                      : 'text-slate-600'
-                    : 'font-semibold'
+            {isShowingCurrentTranslation && currentTranslation ? (
+              <div
+                className={`rounded-2xl border p-4 ${
+                  isDark
+                    ? 'border-indigo-500/40 bg-indigo-500/[0.08]'
+                    : 'border-indigo-200 bg-indigo-50/70'
                 }`}
               >
-                {currentQuestion.question_hi}
-              </p>
+                <div className="mb-1.5 flex items-center justify-between text-[11px] font-bold uppercase tracking-wider text-indigo-400">
+                  <span>
+                    Translated View (
+                    {TRANSLATION_LANGUAGES.find((l) => l.id === currentTranslation.lang)?.native ||
+                      currentTranslation.lang.toUpperCase()}
+                    )
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setShowTranslatedView((prev) => ({
+                        ...prev,
+                        [currentQuestion.id]: false,
+                      }))
+                    }
+                    className="underline"
+                  >
+                    Switch to Original
+                  </button>
+                </div>
+                <p className="text-base font-semibold leading-relaxed sm:text-lg">
+                  {currentTranslation.questionText}
+                </p>
+              </div>
+            ) : (
+              <>
+                {(language === 'en' || language === 'bilingual') && (
+                  <p className="text-base font-semibold leading-relaxed sm:text-lg">
+                    {currentQuestion.question_en}
+                  </p>
+                )}
+                {(language === 'hi' || language === 'bilingual') && (
+                  <p
+                    className={`text-base leading-relaxed sm:text-lg ${
+                      language === 'bilingual'
+                        ? isDark
+                          ? 'text-slate-300'
+                          : 'text-slate-600'
+                        : 'font-semibold'
+                    }`}
+                  >
+                    {currentQuestion.question_hi}
+                  </p>
+                )}
+              </>
             )}
           </div>
 
@@ -1150,6 +1832,10 @@ export const TestEngineModal: React.FC<TestEngineModalProps> = ({
           <div className="mt-6 space-y-3">
             {currentQuestion.options_en.map((optEn, idx) => {
               const optHi = currentQuestion.options_hi[idx] || optEn;
+              const translatedOptionText =
+                isShowingCurrentTranslation && currentTranslation?.options?.[idx]
+                  ? currentTranslation.options[idx]
+                  : null;
               const isSelected = selectedOpt === idx;
               const isCorrectOption = idx === currentQuestion.correctIndex;
 
@@ -1191,17 +1877,28 @@ export const TestEngineModal: React.FC<TestEngineModalProps> = ({
                   </span>
 
                   <div className="flex-1 space-y-1 text-sm sm:text-base">
-                    {(language === 'en' || language === 'bilingual') && (
-                      <p className="font-medium leading-snug">{optEn}</p>
-                    )}
-                    {(language === 'hi' || language === 'bilingual') && (
-                      <p
-                        className={`leading-snug ${
-                          language === 'bilingual' ? 'text-xs sm:text-sm opacity-85' : 'font-medium'
-                        }`}
-                      >
-                        {optHi}
-                      </p>
+                    {translatedOptionText ? (
+                      <>
+                        <p className="font-medium leading-snug">{translatedOptionText}</p>
+                        <p className="text-xs opacity-70">{optEn}</p>
+                      </>
+                    ) : (
+                      <>
+                        {(language === 'en' || language === 'bilingual') && (
+                          <p className="font-medium leading-snug">{optEn}</p>
+                        )}
+                        {(language === 'hi' || language === 'bilingual') && (
+                          <p
+                            className={`leading-snug ${
+                              language === 'bilingual'
+                                ? 'text-xs sm:text-sm opacity-85'
+                                : 'font-medium'
+                            }`}
+                          >
+                            {optHi}
+                          </p>
+                        )}
+                      </>
                     )}
                   </div>
 
@@ -1254,6 +1951,15 @@ export const TestEngineModal: React.FC<TestEngineModalProps> = ({
               </div>
 
               <div className="mt-3.5 space-y-3">
+                {isShowingCurrentTranslation && currentTranslation?.explanation && (
+                  <div className="rounded-xl border border-indigo-500/30 bg-indigo-500/10 p-3.5 text-xs leading-relaxed sm:text-sm">
+                    <p className="font-bold text-indigo-400">
+                      Translated Explanation ({currentTranslation.lang.toUpperCase()})
+                    </p>
+                    <p className="mt-1">{currentTranslation.explanation}</p>
+                  </div>
+                )}
+
                 {(explanationTab === 'both' || explanationTab === 'basic') && (
                   <div
                     className={`rounded-xl border p-3.5 ${
@@ -1495,7 +2201,7 @@ export const TestEngineModal: React.FC<TestEngineModalProps> = ({
       )}
 
       {/* ==========================================================================
-          SUBMISSION CONFIRMATION DIALOG (Prevents Accidental Submit)
+          SUBMISSION CONFIRMATION DIALOG (Prevents Accidental or Duplicate Submit)
          ========================================================================== */}
       {showSubmitConfirm && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 backdrop-blur-sm">
@@ -1580,7 +2286,7 @@ export const TestEngineModal: React.FC<TestEngineModalProps> = ({
             <p className="mt-1 text-xs leading-relaxed text-slate-400">
               Leaving now will discard your current unsubmitted attempt. You can also submit now to save your score.
             </p>
-            <div className="mt-6 flex gap-3">
+            <div className="mt-6 flex flex-wrap gap-2.5">
               <button
                 type="button"
                 onClick={() => setShowExitConfirm(false)}
@@ -1592,8 +2298,18 @@ export const TestEngineModal: React.FC<TestEngineModalProps> = ({
               </button>
               <button
                 type="button"
+                onClick={() => {
+                  setShowExitConfirm(false);
+                  finalizeSubmission();
+                }}
+                className="min-h-[44px] flex-1 rounded-xl bg-emerald-600 px-4 py-2 text-xs font-bold text-white hover:bg-emerald-500"
+              >
+                Submit & Save
+              </button>
+              <button
+                type="button"
                 onClick={onClose}
-                className="min-h-[44px] flex-1 rounded-xl bg-rose-600 px-4 py-2 text-xs font-bold text-white hover:bg-rose-500"
+                className="min-h-[44px] w-full rounded-xl bg-rose-600 px-4 py-2 text-xs font-bold text-white hover:bg-rose-500 sm:w-auto"
               >
                 Discard & Exit
               </button>

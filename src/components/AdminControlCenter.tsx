@@ -11,17 +11,25 @@ import {
   FileSpreadsheet,
   FileText,
   FolderPlus,
+  Gift,
+  Headphones,
+  Image as ImageIcon,
   KeyRound,
   Layers,
   LayoutDashboard,
   Lock,
   LogOut,
   Menu,
+  MessageSquare,
   Plus,
   RefreshCw,
   RotateCcw,
   Search,
+  Send,
   Shield,
+  Sliders,
+  Sparkles,
+  Star,
   Tag,
   Trash2,
   Upload,
@@ -29,19 +37,28 @@ import {
   X,
 } from 'lucide-react';
 import {
+  CommissionStatus,
   CouponCode,
   CustomFolder,
+  DynamicCategoryNode,
   ExamCategory,
   ExamFamily,
   ExamStageConfig,
   GitHubSyncConfig,
   ImportBatchHistory,
   MasterDatabase,
+  OfferTemplateId,
+  PromotionalOfferItem,
   Question,
   QuestionExamMapping,
   QuestionSourceClassification,
+  ReferralCommissionRecord,
+  ReferralPolicyConfig,
+  StudentFeedbackItem,
   StudentSaleLog,
   StudyNote,
+  SupportContactConfig,
+  SupportTicket,
   TestSeriesPack,
 } from '../types/database';
 import {
@@ -76,6 +93,7 @@ interface AdminControlCenterProps {
 type AdminSection =
   | 'overview'
   | 'exams'
+  | 'categories'
   | 'subjects'
   | 'questions'
   | 'import'
@@ -83,6 +101,8 @@ type AdminSection =
   | 'notes'
   | 'students'
   | 'pricing'
+  | 'referrals'
+  | 'support'
   | 'sync';
 
 function parseCsvLine(line: string): string[] {
@@ -258,6 +278,64 @@ export const AdminControlCenter: React.FC<AdminControlCenterProps> = ({
   const [packFolderId, setPackFolderId] = useState(
     db.folders.find((f) => f.type === 'test')?.id || db.folders[0]?.id || 'folder-cgl-pyq'
   );
+  // Phase 8: Admin Test Customization Rules State
+  const [packCustomizationAllowed, setPackCustomizationAllowed] = useState(true);
+  const [packAllowModeSwitch, setPackAllowModeSwitch] = useState(true);
+  const [packAllowTimerChange, setPackAllowTimerChange] = useState(true);
+  const [packAllowQCountChange, setPackAllowQCountChange] = useState(false);
+  const [packRandomizeQuestions, setPackRandomizeQuestions] = useState(false);
+  const [packCategoryId, setPackCategoryId] = useState(
+    db.dynamicCategories?.find((c) => !c.parentId)?.id || ''
+  );
+  const [packSubcategoryId, setPackSubcategoryId] = useState('');
+
+  // Phase 10: Dynamic Categories & Subcategories State
+  const [catNameEn, setCatNameEn] = useState('');
+  const [catNameHi, setCatNameHi] = useState('');
+  const [catParentId, setCatParentId] = useState<string>('');
+  const [catDesc, setCatDesc] = useState('');
+  const [catOrder, setCatOrder] = useState('1');
+  const [editingCatId, setEditingCatId] = useState<string | null>(null);
+
+  // Phase 11: Promotional Offers & Visual Templates State
+  const [promoTitleEn, setPromoTitleEn] = useState('');
+  const [promoTitleHi, setPromoTitleHi] = useState('');
+  const [promoSubtitleEn, setPromoSubtitleEn] = useState('');
+  const [promoBadgeText, setPromoBadgeText] = useState('SPECIAL OFFER');
+  const [promoDiscountText, setPromoDiscountText] = useState('70% OFF');
+  const [promoCouponCode, setPromoCouponCode] = useState('ZYVRA50');
+  const [promoTemplateId, setPromoTemplateId] = useState<OfferTemplateId>('royal_indigo');
+  const [promoCtaText, setPromoCtaText] = useState('Claim Offer Now');
+  const [promoValidUntil, setPromoValidUntil] = useState('2027-12-31');
+  const [promoBannerImageUrl, setPromoBannerImageUrl] = useState('');
+  const [promoImageError, setPromoImageError] = useState('');
+
+  // Phase 9: Refer & Earn Policy State
+  const [referralForm, setReferralForm] = useState<ReferralPolicyConfig>(() =>
+    db.referralPolicy || {
+      enabled: true,
+      commissionType: 'percent',
+      commissionValue: 20,
+      minPayoutThreshold: 100,
+      qualifyingEvent: 'pro_activation',
+      termsSummary:
+        'Earn 20% commission on every verified Pro Pass upgrade made using your referral code.',
+    }
+  );
+
+  // Phase 5: Support & Contact Config + Ticket Reply State
+  const [supportForm, setSupportForm] = useState<SupportContactConfig>(() =>
+    db.supportConfig || {
+      supportEmail: 'support@zyvra.in',
+      helplineNumber: '+91-9876543210',
+      whatsappSupport: '+91-9876543210',
+      workingHours: 'Mon – Sat, 9:00 AM to 7:00 PM IST',
+      supportAddress: 'Zyvra EdTech Academic Desk, Patna & New Delhi, India',
+      responseSlaEn: 'Standard response within 4 working hours.',
+      responseSlaHi: 'सामान्यतः 4 कार्य घंटों के भीतर उत्तर दिया जाता है।',
+    }
+  );
+  const [ticketReplyInputs, setTicketReplyInputs] = useState<Record<string, string>>({});
 
   // ============================================================================
   // 6. NOTES & PDFS STATE
@@ -326,7 +404,7 @@ export const AdminControlCenter: React.FC<AdminControlCenterProps> = ({
   }, [db.questions, qFilterExam, qFilterSubject, qSearch]);
 
   // ============================================================================
-  // ADMIN AUTHENTICATION HANDLERS (Backend API + Salted Local Owner Auth)
+  // ADMIN AUTHENTICATION HANDLERS (Mobile + Backend API + Salted Local Owner Auth)
   // ============================================================================
   const handleAdminLogin = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -334,15 +412,18 @@ export const AdminControlCenter: React.FC<AdminControlCenterProps> = ({
     setLoginError('');
     setLoginSuccessMsg('');
 
-    // Path 1: Production Backend Authentication when VITE_API_BASE_URL is configured
-    if (apiBaseUrl.trim()) {
+    const base = apiBaseUrl.trim().replace(/\/$/, '');
+
+    // Path 1: Explicit VITE_API_BASE_URL Backend Authentication
+    if (base) {
       try {
-        const res = await fetch(`${apiBaseUrl.replace(/\/$/, '')}/api/admin/login`, {
+        const res = await fetch(`${base}/api/admin/login`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             loginId: loginIdInput.trim(),
             password: passcodeInput,
+            autoProvisionIfUnconfigured: true,
           }),
         });
         if (!res.ok) {
@@ -357,7 +438,7 @@ export const AdminControlCenter: React.FC<AdminControlCenterProps> = ({
           mode: 'backend_jwt',
           token: data.token,
           authenticatedAt: new Date().toLocaleTimeString('en-IN'),
-          expiresAt: Date.now() + 4 * 60 * 60 * 1000,
+          expiresAt: Date.now() + 8 * 60 * 60 * 1000,
         };
         saveAdminSession(session);
         setAdminSession(session);
@@ -371,7 +452,7 @@ export const AdminControlCenter: React.FC<AdminControlCenterProps> = ({
       }
     }
 
-    // Path 2A: Initial Owner Setup (when no local credentials exist on this browser yet)
+    // Path 2A: Initial Owner Setup (provisions both local salted hash AND unified same-origin backend)
     if (authDialogMode === 'setup') {
       if (passcodeInput !== passcodeConfirmInput) {
         setLoginError('Passcode and Confirm Passcode do not match.');
@@ -384,12 +465,32 @@ export const AdminControlCenter: React.FC<AdminControlCenterProps> = ({
         setLoginBusy(false);
         return;
       }
+      let backendToken: string | undefined;
+      try {
+        const srvRes = await fetch('/api/admin/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            loginId: loginIdInput.trim(),
+            password: passcodeInput,
+            autoProvisionIfUnconfigured: true,
+          }),
+        });
+        if (srvRes.ok) {
+          const srvData = await srvRes.json();
+          backendToken = srvData.token;
+        }
+      } catch {
+        // Offline / static deployment fallback
+      }
+
       setIsLocalCredInitialized(true);
       const session: AdminSession = {
         loginId: loginIdInput.trim(),
-        mode: 'local_owner',
+        mode: backendToken ? 'backend_jwt' : 'local_owner',
+        token: backendToken,
         authenticatedAt: new Date().toLocaleTimeString('en-IN'),
-        expiresAt: Date.now() + 4 * 60 * 60 * 1000,
+        expiresAt: Date.now() + 8 * 60 * 60 * 1000,
       };
       saveAdminSession(session);
       setAdminSession(session);
@@ -428,7 +529,37 @@ export const AdminControlCenter: React.FC<AdminControlCenterProps> = ({
       return;
     }
 
-    // Path 2C: Standard Local Owner Sign-In (Salted SHA-256 verification)
+    // Path 2C: Sign-In (Checks unified same-origin backend first, then local salted SHA-256)
+    try {
+      const srvRes = await fetch('/api/admin/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          loginId: loginIdInput.trim(),
+          password: passcodeInput,
+        }),
+      });
+      if (srvRes.ok) {
+        const srvData = await srvRes.json();
+        await initializeOrUpdateLocalAdminCredentials(loginIdInput.trim(), passcodeInput);
+        setIsLocalCredInitialized(true);
+        const session: AdminSession = {
+          loginId: loginIdInput.trim(),
+          mode: 'backend_jwt',
+          token: srvData.token,
+          authenticatedAt: new Date().toLocaleTimeString('en-IN'),
+          expiresAt: Date.now() + 8 * 60 * 60 * 1000,
+        };
+        saveAdminSession(session);
+        setAdminSession(session);
+        setPasscodeInput('');
+        setLoginBusy(false);
+        return;
+      }
+    } catch {
+      // Fall through to local salted hash verification when offline or static
+    }
+
     const check = await verifyLocalAdminCredentials(loginIdInput, passcodeInput);
     setLoginBusy(false);
 
@@ -441,7 +572,7 @@ export const AdminControlCenter: React.FC<AdminControlCenterProps> = ({
       loginId: loginIdInput.trim(),
       mode: 'local_owner',
       authenticatedAt: new Date().toLocaleTimeString('en-IN'),
-      expiresAt: Date.now() + 4 * 60 * 60 * 1000,
+      expiresAt: Date.now() + 8 * 60 * 60 * 1000,
     };
     saveAdminSession(session);
     setAdminSession(session);
@@ -449,6 +580,7 @@ export const AdminControlCenter: React.FC<AdminControlCenterProps> = ({
   };
 
   const handleAdminLogout = () => {
+    fetch('/api/admin/logout', { method: 'POST' }).catch(() => {});
     clearAdminSession();
     setAdminSession(null);
     setPasscodeInput('');
@@ -961,6 +1093,16 @@ export const AdminControlCenter: React.FC<AdminControlCenterProps> = ({
       negativeMarking: parseFloat(packNegMarks) >= 0 ? parseFloat(packNegMarks) : 0.5,
       shiftTag: packShiftTag.trim() || 'Official Set',
       isPro: packIsPro,
+      categoryId: packCategoryId || undefined,
+      subcategoryId: packSubcategoryId || undefined,
+      customizationRules: {
+        customizationAllowed: packCustomizationAllowed,
+        allowModeSwitch: packCustomizationAllowed ? packAllowModeSwitch : false,
+        allowTimerChange: packCustomizationAllowed ? packAllowTimerChange : false,
+        allowQuestionCountChange: packCustomizationAllowed ? packAllowQCountChange : false,
+        allowCategoryFilter: false,
+        randomizeQuestions: packRandomizeQuestions,
+      },
     };
     onUpdateDatabase({
       ...db,
@@ -968,7 +1110,137 @@ export const AdminControlCenter: React.FC<AdminControlCenterProps> = ({
     });
     setPackTitleEn('');
     setPackTitleHi('');
-    notify(`Published Test Pack "${newPack.title_en}".`);
+    notify(
+      `Published Test Pack "${newPack.title_en}" (${
+        packCustomizationAllowed ? 'Customizable' : 'Fixed Parameters'
+      }).`
+    );
+  };
+
+  // Phase 10: Save Dynamic Category / Subcategory
+  const handleSaveDynamicCategory = () => {
+    if (!catNameEn.trim()) {
+      notify('Enter category or subcategory name in English.', false);
+      return;
+    }
+    const list = db.dynamicCategories || [];
+    const slug = catNameEn
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-|-$/g, '');
+
+    if (editingCatId) {
+      const updated = list.map((c) =>
+        c.id === editingCatId
+          ? {
+              ...c,
+              name_en: catNameEn.trim(),
+              name_hi: catNameHi.trim() || catNameEn.trim(),
+              slug,
+              parentId: catParentId || null,
+              description: catDesc.trim() || undefined,
+              order: Number(catOrder) || 1,
+            }
+          : c
+      );
+      onUpdateDatabase({ ...db, dynamicCategories: updated });
+      setEditingCatId(null);
+      notify(`Updated category "${catNameEn.trim()}".`);
+    } else {
+      const node: DynamicCategoryNode = {
+        id: `dcat-${Date.now()}`,
+        name_en: catNameEn.trim(),
+        name_hi: catNameHi.trim() || catNameEn.trim(),
+        slug,
+        parentId: catParentId || null,
+        description: catDesc.trim() || undefined,
+        order: Number(catOrder) || list.length + 1,
+        status: 'active',
+        createdAt: Date.now(),
+      };
+      onUpdateDatabase({ ...db, dynamicCategories: [...list, node] });
+      notify(
+        `Created ${catParentId ? 'Subcategory' : 'Main Category'} "${node.name_en}".`
+      );
+    }
+    setCatNameEn('');
+    setCatNameHi('');
+    setCatDesc('');
+  };
+
+  // Phase 11: Promotional Offer Image Upload & Offer Creation
+  const handlePromoBannerFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    setPromoImageError('');
+    if (!file) return;
+    if (!file.type.startsWith('image/')) {
+      setPromoImageError('Invalid file format. Please select a PNG, JPG, WEBP, or SVG image.');
+      return;
+    }
+    if (file.size > 2 * 1024 * 1024) {
+      setPromoImageError('Image exceeds 2MB size limit. Please choose a smaller image.');
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = async () => {
+      if (typeof reader.result === 'string') {
+        const dataUrl = reader.result;
+        try {
+          const res = await fetch('/api/admin/offers/upload-image', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ dataUrl, fileName: file.name }),
+          });
+          if (!res.ok) {
+            const err = await res.json().catch(() => ({}));
+            setPromoImageError(err.error || 'Image validation failed.');
+            return;
+          }
+        } catch {
+          // Offline local validation already passed
+        }
+        setPromoBannerImageUrl(dataUrl);
+      }
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const handleCreatePromoOffer = () => {
+    if (!promoTitleEn.trim()) {
+      notify('Enter an Offer Headline first.', false);
+      return;
+    }
+    const item: PromotionalOfferItem = {
+      id: `promo-${Date.now()}`,
+      title_en: promoTitleEn.trim(),
+      title_hi: promoTitleHi.trim() || promoTitleEn.trim(),
+      subtitle_en:
+        promoSubtitleEn.trim() ||
+        'Unlock all verified PYQ papers, mock tests, and dual-method solutions.',
+      subtitle_hi:
+        promoSubtitleEn.trim() ||
+        'सभी परीक्षाओं के PYQ और मॉक टेस्ट अनलॉक करें।',
+      badgeText: promoBadgeText.trim() || 'LIMITED OFFER',
+      discountText: promoDiscountText.trim() || '70% OFF',
+      couponCode: promoCouponCode.trim().toUpperCase() || undefined,
+      templateId: promoTemplateId,
+      bannerImageUrl: promoBannerImageUrl || undefined,
+      ctaText: promoCtaText.trim() || 'Unlock Now',
+      validFrom: new Date().toISOString().slice(0, 10),
+      validUntil: promoValidUntil || '2027-12-31',
+      priority: (db.promotionalOffers || []).length + 1,
+      active: true,
+    };
+    onUpdateDatabase({
+      ...db,
+      promotionalOffers: [item, ...(db.promotionalOffers || [])],
+    });
+    setPromoTitleEn('');
+    setPromoTitleHi('');
+    setPromoSubtitleEn('');
+    setPromoBannerImageUrl('');
+    notify(`Published Promotional Offer "${item.title_en}".`);
   };
 
   const handlePdfFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -1361,14 +1633,25 @@ export const AdminControlCenter: React.FC<AdminControlCenterProps> = ({
 
   const navItems: Array<{ id: AdminSection; label: string; icon: React.ReactNode }> = [
     { id: 'overview', label: 'Overview', icon: <LayoutDashboard className="h-4 w-4" /> },
-    { id: 'exams', label: 'Exams & Categories', icon: <Layers className="h-4 w-4" /> },
+    { id: 'exams', label: 'Exams & Families', icon: <Layers className="h-4 w-4" /> },
+    {
+      id: 'categories',
+      label: 'Categories & Subcategories',
+      icon: <Sliders className="h-4 w-4" />,
+    },
     { id: 'subjects', label: 'Subjects & Chapters', icon: <BookOpen className="h-4 w-4" /> },
     { id: 'questions', label: 'Question Bank', icon: <Database className="h-4 w-4" /> },
     { id: 'import', label: 'Import & Export', icon: <Upload className="h-4 w-4" /> },
-    { id: 'tests', label: 'Tests & Folders', icon: <FolderPlus className="h-4 w-4" /> },
+    { id: 'tests', label: 'Tests & Customization', icon: <FolderPlus className="h-4 w-4" /> },
     { id: 'notes', label: 'Notes & PDFs', icon: <FileText className="h-4 w-4" /> },
     { id: 'students', label: 'Students & Pro Keys', icon: <Users className="h-4 w-4" /> },
-    { id: 'pricing', label: 'Pricing & Coupons', icon: <Tag className="h-4 w-4" /> },
+    { id: 'pricing', label: 'Offers & Templates', icon: <Tag className="h-4 w-4" /> },
+    { id: 'referrals', label: 'Refer & Earn Ledger', icon: <Gift className="h-4 w-4" /> },
+    {
+      id: 'support',
+      label: 'Feedback & Support Desk',
+      icon: <Headphones className="h-4 w-4" />,
+    },
     { id: 'sync', label: 'Cloud Sync & Security', icon: <Cloud className="h-4 w-4" /> },
   ];
 
@@ -2599,6 +2882,111 @@ export const AdminControlCenter: React.FC<AdminControlCenterProps> = ({
                           <span>Pro Pass Required</span>
                         </label>
                       </div>
+
+                      {/* Dynamic Category & Subcategory Assignment (Phase 10) */}
+                      <div className="grid grid-cols-2 gap-2">
+                        <select
+                          value={packCategoryId}
+                          onChange={(e) => {
+                            setPackCategoryId(e.target.value);
+                            setPackSubcategoryId('');
+                          }}
+                          className={`min-h-[40px] rounded-xl border px-3 text-xs outline-none ${
+                            isDark
+                              ? 'border-white/10 bg-[#0F172A] text-white'
+                              : 'border-slate-200 bg-white text-slate-900'
+                          }`}
+                        >
+                          <option value="">Main Category (Optional)</option>
+                          {(db.dynamicCategories || [])
+                            .filter((c) => !c.parentId && c.status !== 'archived')
+                            .map((c) => (
+                              <option key={c.id} value={c.id}>
+                                {c.name_en}
+                              </option>
+                            ))}
+                        </select>
+                        <select
+                          value={packSubcategoryId}
+                          onChange={(e) => setPackSubcategoryId(e.target.value)}
+                          className={`min-h-[40px] rounded-xl border px-3 text-xs outline-none ${
+                            isDark
+                              ? 'border-white/10 bg-[#0F172A] text-white'
+                              : 'border-slate-200 bg-white text-slate-900'
+                          }`}
+                        >
+                          <option value="">Subcategory (Optional)</option>
+                          {(db.dynamicCategories || [])
+                            .filter((c) => c.parentId === packCategoryId && c.status !== 'archived')
+                            .map((c) => (
+                              <option key={c.id} value={c.id}>
+                                {c.name_en}
+                              </option>
+                            ))}
+                        </select>
+                      </div>
+
+                      {/* Phase 8: Admin Test Customization Controls */}
+                      <div
+                        className={`rounded-xl border p-3 text-xs ${
+                          isDark
+                            ? 'border-indigo-500/30 bg-indigo-500/[0.05]'
+                            : 'border-indigo-200 bg-indigo-50/60'
+                        }`}
+                      >
+                        <div className="flex items-center justify-between">
+                          <span className="font-bold text-indigo-400">
+                            Customization Allowed for Students
+                          </span>
+                          <input
+                            type="checkbox"
+                            checked={packCustomizationAllowed}
+                            onChange={(e) => setPackCustomizationAllowed(e.target.checked)}
+                            className="h-4 w-4 accent-indigo-600"
+                          />
+                        </div>
+                        {packCustomizationAllowed ? (
+                          <div className="mt-2.5 grid grid-cols-2 gap-2 text-[11px] text-slate-300">
+                            <label className="flex items-center gap-1.5">
+                              <input
+                                type="checkbox"
+                                checked={packAllowModeSwitch}
+                                onChange={(e) => setPackAllowModeSwitch(e.target.checked)}
+                              />
+                              <span>Allow Mode Switch</span>
+                            </label>
+                            <label className="flex items-center gap-1.5">
+                              <input
+                                type="checkbox"
+                                checked={packAllowTimerChange}
+                                onChange={(e) => setPackAllowTimerChange(e.target.checked)}
+                              />
+                              <span>Allow Timer Edit</span>
+                            </label>
+                            <label className="flex items-center gap-1.5">
+                              <input
+                                type="checkbox"
+                                checked={packAllowQCountChange}
+                                onChange={(e) => setPackAllowQCountChange(e.target.checked)}
+                              />
+                              <span>Allow Question Count</span>
+                            </label>
+                            <label className="flex items-center gap-1.5">
+                              <input
+                                type="checkbox"
+                                checked={packRandomizeQuestions}
+                                onChange={(e) => setPackRandomizeQuestions(e.target.checked)}
+                              />
+                              <span>Shuffle Questions</span>
+                            </label>
+                          </div>
+                        ) : (
+                          <p className="mt-1.5 text-[11px] text-amber-400">
+                            Students must attempt this test with fixed official duration, mode, and question set.
+                          </p>
+                        )}
+                      </div>
+
                       <button
                         type="button"
                         onClick={handleCreateTestPack}
@@ -2665,41 +3053,84 @@ export const AdminControlCenter: React.FC<AdminControlCenterProps> = ({
                       Published Test Series Packs ({db.testSeries.length})
                     </h3>
                     <div className="mt-3 divide-y divide-white/10">
-                      {db.testSeries.map((pack) => (
-                        <div
-                          key={pack.id}
-                          className="flex items-center justify-between gap-2 py-2.5 text-xs"
-                        >
-                          <div>
-                            <p className="font-bold">{pack.title_en}</p>
-                            <p className="text-slate-400">
-                              {pack.exam} · {pack.questionIds.length} Qs · {pack.durationMinutes}m ·
-                              +{pack.marksPerCorrect}/-{pack.negativeMarking}{' '}
-                              {pack.isPro ? '· PRO' : '· FREE'}
-                            </p>
-                          </div>
-                          <button
-                            type="button"
-                            onClick={() =>
-                              setConfirmDelete({
-                                label: `Test Pack "${pack.title_en}"`,
-                                onConfirm: () => {
-                                  onUpdateDatabase({
-                                    ...db,
-                                    testSeries: db.testSeries.filter((item) => item.id !== pack.id),
-                                  });
-                                  setConfirmDelete(null);
-                                  notify('Test Series Pack deleted.');
-                                },
-                              })
-                            }
-                            className="rounded-lg border border-rose-500/30 bg-rose-500/10 p-2 text-rose-400"
-                            title="Delete Test Pack"
+                      {db.testSeries.map((pack) => {
+                        const isCustomizable =
+                          pack.customizationRules?.customizationAllowed !== false;
+                        return (
+                          <div
+                            key={pack.id}
+                            className="flex items-center justify-between gap-2 py-2.5 text-xs"
                           >
-                            <Trash2 className="h-3.5 w-3.5" />
-                          </button>
-                        </div>
-                      ))}
+                            <div>
+                              <p className="font-bold">{pack.title_en}</p>
+                              <p className="text-slate-400">
+                                {pack.exam} · {pack.questionIds.length} Qs · {pack.durationMinutes}m ·
+                                +{pack.marksPerCorrect}/-{pack.negativeMarking}{' '}
+                                {pack.isPro ? '· PRO' : '· FREE'}
+                              </p>
+                            </div>
+                            <div className="flex items-center gap-1.5">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  const nextAllowed = !isCustomizable;
+                                  const updatedPacks = db.testSeries.map((p) =>
+                                    p.id === pack.id
+                                      ? {
+                                          ...p,
+                                          customizationRules: {
+                                            customizationAllowed: nextAllowed,
+                                            allowModeSwitch: nextAllowed,
+                                            allowTimerChange: nextAllowed,
+                                            allowQuestionCountChange: false,
+                                            allowCategoryFilter: false,
+                                            randomizeQuestions: false,
+                                          },
+                                        }
+                                      : p
+                                  );
+                                  onUpdateDatabase({ ...db, testSeries: updatedPacks });
+                                  notify(
+                                    `Test Pack "${pack.title_en}" set to ${
+                                      nextAllowed ? 'Customizable' : 'Fixed / Locked'
+                                    }.`
+                                  );
+                                }}
+                                className={`rounded-lg border px-2.5 py-1 text-[11px] font-bold ${
+                                  isCustomizable
+                                    ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-400'
+                                    : 'border-amber-500/30 bg-amber-500/10 text-amber-400'
+                                }`}
+                                title="Toggle Student Customization Permission"
+                              >
+                                {isCustomizable ? 'Customizable' : 'Locked'}
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setConfirmDelete({
+                                    label: `Test Pack "${pack.title_en}"`,
+                                    onConfirm: () => {
+                                      onUpdateDatabase({
+                                        ...db,
+                                        testSeries: db.testSeries.filter(
+                                          (item) => item.id !== pack.id
+                                        ),
+                                      });
+                                      setConfirmDelete(null);
+                                      notify('Test Series Pack deleted.');
+                                    },
+                                  })
+                                }
+                                className="rounded-lg border border-rose-500/30 bg-rose-500/10 p-2 text-rose-400"
+                                title="Delete Test Pack"
+                              >
+                                <Trash2 className="h-3.5 w-3.5" />
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })}
                     </div>
                   </div>
                 </div>
@@ -3273,6 +3704,934 @@ export const AdminControlCenter: React.FC<AdminControlCenterProps> = ({
                       </div>
                     ))}
                   </div>
+                </div>
+
+                {/* Phase 11: Promotional Offers, Visual Templates & Banner Image Manager */}
+                <div
+                  className={`rounded-2xl p-5 ${
+                    isDark ? 'surface-card-dark' : 'surface-card-light'
+                  }`}
+                >
+                  <div className="flex items-center gap-2">
+                    <Sparkles className="h-4 w-4 text-amber-400" />
+                    <h3 className="text-sm font-bold">
+                      Promotional Offers, Visual Templates & Banner Images
+                    </h3>
+                  </div>
+                  <p className="mt-1 text-xs text-slate-400">
+                    Create rich student promotional cards using built-in visual templates or upload a custom banner image (max 2MB).
+                  </p>
+
+                  <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-3">
+                    <input
+                      type="text"
+                      value={promoTitleEn}
+                      onChange={(e) => setPromoTitleEn(e.target.value)}
+                      placeholder="Offer Headline (English — e.g. BPSC & SSC Mega Scholarship)"
+                      className={`min-h-[42px] rounded-xl border px-3 text-xs outline-none ${
+                        isDark
+                          ? 'border-white/10 bg-white/5 text-white'
+                          : 'border-slate-200 bg-white text-slate-900'
+                      }`}
+                    />
+                    <input
+                      type="text"
+                      value={promoTitleHi}
+                      onChange={(e) => setPromoTitleHi(e.target.value)}
+                      placeholder="ऑफर शीर्षक (हिन्दी)"
+                      className={`min-h-[42px] rounded-xl border px-3 text-xs outline-none ${
+                        isDark
+                          ? 'border-white/10 bg-white/5 text-white'
+                          : 'border-slate-200 bg-white text-slate-900'
+                      }`}
+                    />
+                    <select
+                      value={promoTemplateId}
+                      onChange={(e) => setPromoTemplateId(e.target.value as OfferTemplateId)}
+                      className={`min-h-[42px] rounded-xl border px-3 text-xs font-semibold outline-none ${
+                        isDark
+                          ? 'border-white/10 bg-[#0F172A] text-white'
+                          : 'border-slate-200 bg-white text-slate-900'
+                      }`}
+                    >
+                      <option value="royal_indigo">Template 1: Royal Indigo Gradient</option>
+                      <option value="emerald_scholar">Template 2: Emerald Scholar Pass</option>
+                      <option value="amber_festive">Template 3: Amber Festive Gold</option>
+                      <option value="crimson_urgent">Template 4: Crimson Flash Sale</option>
+                    </select>
+                    <input
+                      type="text"
+                      value={promoBadgeText}
+                      onChange={(e) => setPromoBadgeText(e.target.value)}
+                      placeholder="Badge (e.g. FESTIVAL OFFER)"
+                      className={`min-h-[42px] rounded-xl border px-3 text-xs outline-none ${
+                        isDark
+                          ? 'border-white/10 bg-white/5 text-white'
+                          : 'border-slate-200 bg-white text-slate-900'
+                      }`}
+                    />
+                    <input
+                      type="text"
+                      value={promoDiscountText}
+                      onChange={(e) => setPromoDiscountText(e.target.value)}
+                      placeholder="Discount Text (e.g. 70% OFF)"
+                      className={`min-h-[42px] rounded-xl border px-3 text-xs outline-none ${
+                        isDark
+                          ? 'border-white/10 bg-white/5 text-white'
+                          : 'border-slate-200 bg-white text-slate-900'
+                      }`}
+                    />
+                    <input
+                      type="text"
+                      value={promoCouponCode}
+                      onChange={(e) => setPromoCouponCode(e.target.value.toUpperCase())}
+                      placeholder="Linked Coupon (e.g. ZYVRA50)"
+                      className={`min-h-[42px] rounded-xl border px-3 font-mono text-xs uppercase outline-none ${
+                        isDark
+                          ? 'border-white/10 bg-white/5 text-white'
+                          : 'border-slate-200 bg-white text-slate-900'
+                      }`}
+                    />
+                    <input
+                      type="text"
+                      value={promoSubtitleEn}
+                      onChange={(e) => setPromoSubtitleEn(e.target.value)}
+                      placeholder="Subtitle / Description"
+                      className={`min-h-[42px] rounded-xl border px-3 text-xs outline-none ${
+                        isDark
+                          ? 'border-white/10 bg-white/5 text-white'
+                          : 'border-slate-200 bg-white text-slate-900'
+                      }`}
+                    />
+                    <input
+                      type="date"
+                      value={promoValidUntil}
+                      onChange={(e) => setPromoValidUntil(e.target.value)}
+                      className={`min-h-[42px] rounded-xl border px-3 text-xs outline-none ${
+                        isDark
+                          ? 'border-white/10 bg-white/5 text-white'
+                          : 'border-slate-200 bg-white text-slate-900'
+                      }`}
+                    />
+                    <div>
+                      <label className="flex min-h-[42px] cursor-pointer items-center justify-center gap-2 rounded-xl border border-dashed border-indigo-500/40 bg-indigo-500/10 px-3 text-xs font-semibold text-indigo-300 hover:bg-indigo-500/20">
+                        <ImageIcon className="h-4 w-4" />
+                        <span>{promoBannerImageUrl ? 'Change Banner Image' : 'Upload Banner Image'}</span>
+                        <input
+                          type="file"
+                          accept="image/png,image/jpeg,image/webp,image/svg+xml"
+                          onChange={handlePromoBannerFileChange}
+                          className="hidden"
+                        />
+                      </label>
+                    </div>
+                  </div>
+
+                  {promoImageError && (
+                    <p className="mt-2 text-xs font-semibold text-rose-400">{promoImageError}</p>
+                  )}
+
+                  {/* Live Offer Card Preview */}
+                  {(promoTitleEn || promoBannerImageUrl) && (
+                    <div className="mt-4 rounded-2xl border border-indigo-500/30 bg-gradient-to-r from-indigo-950/90 via-slate-900 to-indigo-900/80 p-4 text-white">
+                      <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
+                        <div>
+                          <span className="inline-block rounded-md bg-amber-400/20 px-2 py-0.5 text-[10px] font-bold uppercase text-amber-300">
+                            {promoBadgeText || 'PREVIEW'} · {promoDiscountText}
+                          </span>
+                          <h4 className="mt-1 text-base font-extrabold">
+                            {promoTitleEn || 'Offer Headline Preview'}
+                          </h4>
+                          <p className="mt-0.5 text-xs text-slate-300">
+                            {promoSubtitleEn || 'Full Pro access to all exams and PYQ test packs.'}
+                          </p>
+                        </div>
+                        {promoBannerImageUrl && (
+                          <img
+                            src={promoBannerImageUrl}
+                            alt="Promotional Banner Preview"
+                            className="h-16 w-28 rounded-xl object-cover border border-white/15"
+                          />
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="mt-4 flex justify-end">
+                    <button
+                      type="button"
+                      onClick={handleCreatePromoOffer}
+                      className="min-h-[42px] rounded-xl bg-emerald-600 px-5 text-xs font-bold text-white hover:bg-emerald-500"
+                    >
+                      Publish Promotional Offer
+                    </button>
+                  </div>
+
+                  {/* Published Promotional Offers List */}
+                  <div className="mt-4 divide-y divide-white/10">
+                    {(db.promotionalOffers || []).map((offer) => (
+                      <div
+                        key={offer.id}
+                        className="flex flex-wrap items-center justify-between gap-2 py-3 text-xs"
+                      >
+                        <div className="flex items-center gap-3">
+                          {offer.bannerImageUrl && (
+                            <img
+                              src={offer.bannerImageUrl}
+                              alt={offer.title_en}
+                              className="h-10 w-16 rounded-lg object-cover border border-white/10"
+                            />
+                          )}
+                          <div>
+                            <p className="font-bold">
+                              {offer.title_en}{' '}
+                              <span className="text-emerald-400">({offer.discountText})</span>
+                            </p>
+                            <p className="text-slate-400">
+                              Template: {offer.templateId} · Valid until: {offer.validUntil} ·{' '}
+                              {offer.active ? 'Active' : 'Paused'}
+                            </p>
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const nextOffers = (db.promotionalOffers || []).map((o) =>
+                                o.id === offer.id ? { ...o, active: !o.active } : o
+                              );
+                              onUpdateDatabase({ ...db, promotionalOffers: nextOffers });
+                            }}
+                            className={`rounded-lg border px-2.5 py-1 text-[11px] font-bold ${
+                              offer.active
+                                ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-400'
+                                : 'border-slate-500/30 bg-slate-500/10 text-slate-400'
+                            }`}
+                          >
+                            {offer.active ? 'Active' : 'Paused'}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              onUpdateDatabase({
+                                ...db,
+                                promotionalOffers: (db.promotionalOffers || []).filter(
+                                  (o) => o.id !== offer.id
+                                ),
+                              });
+                              notify('Promotional offer removed.');
+                            }}
+                            className="text-rose-400 hover:underline"
+                          >
+                            Delete
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* ================================================================
+                PHASE 10: DYNAMIC CATEGORIES & SUBCATEGORIES MANAGER
+               ================================================================ */}
+            {activeSection === 'categories' && (
+              <div className="space-y-6">
+                <div>
+                  <h2 className="text-lg font-bold">
+                    Dynamic Categories & Subcategories Hierarchy
+                  </h2>
+                  <p className="text-xs text-slate-400">
+                    Create unlimited Main Categories and child Subcategories for organizing exams, PYQ sets, and custom tests.
+                  </p>
+                </div>
+
+                <div
+                  className={`rounded-2xl p-5 ${
+                    isDark ? 'surface-card-dark' : 'surface-card-light'
+                  }`}
+                >
+                  <h3 className="text-sm font-bold">
+                    {editingCatId ? 'Edit Category / Subcategory' : 'Add Category or Subcategory'}
+                  </h3>
+                  <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-3">
+                    <input
+                      type="text"
+                      value={catNameEn}
+                      onChange={(e) => setCatNameEn(e.target.value)}
+                      placeholder="Category Name (English)"
+                      className={`min-h-[42px] rounded-xl border px-3 text-xs outline-none ${
+                        isDark
+                          ? 'border-white/10 bg-white/5 text-white'
+                          : 'border-slate-200 bg-white text-slate-900'
+                      }`}
+                    />
+                    <input
+                      type="text"
+                      value={catNameHi}
+                      onChange={(e) => setCatNameHi(e.target.value)}
+                      placeholder="श्रेणी का नाम (हिन्दी)"
+                      className={`min-h-[42px] rounded-xl border px-3 text-xs outline-none ${
+                        isDark
+                          ? 'border-white/10 bg-white/5 text-white'
+                          : 'border-slate-200 bg-white text-slate-900'
+                      }`}
+                    />
+                    <select
+                      value={catParentId}
+                      onChange={(e) => setCatParentId(e.target.value)}
+                      className={`min-h-[42px] rounded-xl border px-3 text-xs outline-none ${
+                        isDark
+                          ? 'border-white/10 bg-[#0F172A] text-white'
+                          : 'border-slate-200 bg-white text-slate-900'
+                      }`}
+                    >
+                      <option value="">Top-Level Main Category (No Parent)</option>
+                      {(db.dynamicCategories || [])
+                        .filter((c) => !c.parentId && c.id !== editingCatId)
+                        .map((c) => (
+                          <option key={c.id} value={c.id}>
+                            Subcategory under: {c.name_en}
+                          </option>
+                        ))}
+                    </select>
+                    <input
+                      type="text"
+                      value={catDesc}
+                      onChange={(e) => setCatDesc(e.target.value)}
+                      placeholder="Optional Description"
+                      className={`min-h-[42px] rounded-xl border px-3 text-xs outline-none ${
+                        isDark
+                          ? 'border-white/10 bg-white/5 text-white'
+                          : 'border-slate-200 bg-white text-slate-900'
+                      }`}
+                    />
+                    <input
+                      type="number"
+                      value={catOrder}
+                      onChange={(e) => setCatOrder(e.target.value)}
+                      placeholder="Display Order (1)"
+                      className={`min-h-[42px] rounded-xl border px-3 text-xs outline-none ${
+                        isDark
+                          ? 'border-white/10 bg-white/5 text-white'
+                          : 'border-slate-200 bg-white text-slate-900'
+                      }`}
+                    />
+                    <button
+                      type="button"
+                      onClick={handleSaveDynamicCategory}
+                      className="min-h-[42px] rounded-xl bg-indigo-600 px-4 text-xs font-bold text-white hover:bg-indigo-500"
+                    >
+                      {editingCatId ? 'Update Category' : 'Add Category / Subcategory'}
+                    </button>
+                  </div>
+                </div>
+
+                {/* Hierarchical Tree View */}
+                <div
+                  className={`rounded-2xl p-5 ${
+                    isDark ? 'surface-card-dark' : 'surface-card-light'
+                  }`}
+                >
+                  <h3 className="text-sm font-bold">
+                    Category & Subcategory Hierarchy ({(db.dynamicCategories || []).length} nodes)
+                  </h3>
+                  <div className="mt-4 space-y-4">
+                    {(db.dynamicCategories || [])
+                      .filter((c) => !c.parentId)
+                      .sort((a, b) => a.order - b.order)
+                      .map((mainCat) => {
+                        const children = (db.dynamicCategories || [])
+                          .filter((sub) => sub.parentId === mainCat.id)
+                          .sort((a, b) => a.order - b.order);
+                        return (
+                          <div
+                            key={mainCat.id}
+                            className={`rounded-xl border p-4 ${
+                              isDark
+                                ? 'border-white/10 bg-white/[0.02]'
+                                : 'border-slate-200 bg-slate-50'
+                            }`}
+                          >
+                            <div className="flex flex-wrap items-center justify-between gap-2">
+                              <div>
+                                <span className="text-xs font-extrabold text-indigo-400">
+                                  {mainCat.name_en} ({mainCat.name_hi})
+                                </span>
+                                <span className="ml-2 rounded-md bg-white/10 px-2 py-0.5 text-[10px]">
+                                  {mainCat.status.toUpperCase()}
+                                </span>
+                              </div>
+                              <div className="flex items-center gap-2 text-xs">
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setEditingCatId(mainCat.id);
+                                    setCatNameEn(mainCat.name_en);
+                                    setCatNameHi(mainCat.name_hi);
+                                    setCatParentId('');
+                                    setCatOrder(String(mainCat.order));
+                                  }}
+                                  className="text-indigo-400 hover:underline"
+                                >
+                                  Edit
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    const updated = (db.dynamicCategories || []).map((c) =>
+                                      c.id === mainCat.id
+                                        ? {
+                                            ...c,
+                                            status:
+                                              c.status === 'active'
+                                                ? ('inactive' as const)
+                                                : ('active' as const),
+                                          }
+                                        : c
+                                    );
+                                    onUpdateDatabase({ ...db, dynamicCategories: updated });
+                                  }}
+                                  className="text-amber-400 hover:underline"
+                                >
+                                  {mainCat.status === 'active' ? 'Deactivate' : 'Activate'}
+                                </button>
+                              </div>
+                            </div>
+
+                            {/* Child Subcategories */}
+                            <div className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
+                              {children.map((sub) => (
+                                <div
+                                  key={sub.id}
+                                  className={`flex items-center justify-between rounded-lg border px-3 py-2 text-xs ${
+                                    isDark
+                                      ? 'border-white/10 bg-[#0A0E17]'
+                                      : 'border-slate-200 bg-white'
+                                  }`}
+                                >
+                                  <div>
+                                    <p className="font-semibold">{sub.name_en}</p>
+                                    <p className="text-[11px] text-slate-400">
+                                      {sub.name_hi} · {sub.status}
+                                    </p>
+                                  </div>
+                                  <div className="flex items-center gap-2">
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setEditingCatId(sub.id);
+                                        setCatNameEn(sub.name_en);
+                                        setCatNameHi(sub.name_hi);
+                                        setCatParentId(mainCat.id);
+                                        setCatOrder(String(sub.order));
+                                      }}
+                                      className="text-indigo-400 hover:underline"
+                                    >
+                                      Edit
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        const isUsed = db.testSeries.some(
+                                          (t) => t.subcategoryId === sub.id
+                                        );
+                                        if (isUsed) {
+                                          const archived = (db.dynamicCategories || []).map((c) =>
+                                            c.id === sub.id
+                                              ? { ...c, status: 'archived' as const }
+                                              : c
+                                          );
+                                          onUpdateDatabase({
+                                            ...db,
+                                            dynamicCategories: archived,
+                                          });
+                                          notify(
+                                            'Subcategory is linked to tests; archived safely.'
+                                          );
+                                        } else {
+                                          onUpdateDatabase({
+                                            ...db,
+                                            dynamicCategories: (
+                                              db.dynamicCategories || []
+                                            ).filter((c) => c.id !== sub.id),
+                                          });
+                                          notify('Subcategory deleted.');
+                                        }
+                                      }}
+                                      className="text-rose-400 hover:underline"
+                                    >
+                                      Remove
+                                    </button>
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        );
+                      })}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* ================================================================
+                PHASE 9: REFER & EARN COMMISSION POLICY & LEDGER
+               ================================================================ */}
+            {activeSection === 'referrals' && (
+              <div className="space-y-6">
+                <div>
+                  <h2 className="text-lg font-bold">Refer & Earn Commission Policy & Ledger</h2>
+                  <p className="text-xs text-slate-400">
+                    Configure referral commission rules, minimum payout thresholds, and approve or settle student referral commissions.
+                  </p>
+                </div>
+
+                <div
+                  className={`rounded-2xl p-5 ${
+                    isDark ? 'surface-card-dark' : 'surface-card-light'
+                  }`}
+                >
+                  <div className="flex items-center justify-between">
+                    <h3 className="text-sm font-bold">Referral Commission Policy</h3>
+                    <label className="flex items-center gap-2 text-xs font-bold text-emerald-400">
+                      <input
+                        type="checkbox"
+                        checked={referralForm.enabled}
+                        onChange={(e) =>
+                          setReferralForm({ ...referralForm, enabled: e.target.checked })
+                        }
+                      />
+                      <span>Program Enabled</span>
+                    </label>
+                  </div>
+
+                  <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-3">
+                    <div>
+                      <label className="block text-xs text-slate-400">Commission Type</label>
+                      <select
+                        value={referralForm.commissionType}
+                        onChange={(e) =>
+                          setReferralForm({
+                            ...referralForm,
+                            commissionType: e.target.value as 'fixed' | 'percent',
+                          })
+                        }
+                        className={`mt-1 min-h-[42px] w-full rounded-xl border px-3 text-xs outline-none ${
+                          isDark
+                            ? 'border-white/10 bg-[#0F172A] text-white'
+                            : 'border-slate-200 bg-white text-slate-900'
+                        }`}
+                      >
+                        <option value="percent">Percentage of Order (%)</option>
+                        <option value="fixed">Fixed Amount per Referral (₹)</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-xs text-slate-400">
+                        Commission Value ({referralForm.commissionType === 'percent' ? '%' : '₹'})
+                      </label>
+                      <input
+                        type="number"
+                        value={referralForm.commissionValue}
+                        onChange={(e) =>
+                          setReferralForm({
+                            ...referralForm,
+                            commissionValue: Math.max(0, Number(e.target.value) || 0),
+                          })
+                        }
+                        className={`mt-1 min-h-[42px] w-full rounded-xl border px-3 text-xs outline-none ${
+                          isDark
+                            ? 'border-white/10 bg-white/5 text-white'
+                            : 'border-slate-200 bg-white text-slate-900'
+                        }`}
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs text-slate-400">
+                        Minimum Payout Threshold (₹)
+                      </label>
+                      <input
+                        type="number"
+                        value={referralForm.minPayoutThreshold}
+                        onChange={(e) =>
+                          setReferralForm({
+                            ...referralForm,
+                            minPayoutThreshold: Math.max(10, Number(e.target.value) || 100),
+                          })
+                        }
+                        className={`mt-1 min-h-[42px] w-full rounded-xl border px-3 text-xs outline-none ${
+                          isDark
+                            ? 'border-white/10 bg-white/5 text-white'
+                            : 'border-slate-200 bg-white text-slate-900'
+                        }`}
+                      />
+                    </div>
+                  </div>
+
+                  <div className="mt-3">
+                    <label className="block text-xs text-slate-400">Student Terms Summary</label>
+                    <input
+                      type="text"
+                      value={referralForm.termsSummary}
+                      onChange={(e) =>
+                        setReferralForm({ ...referralForm, termsSummary: e.target.value })
+                      }
+                      className={`mt-1 min-h-[42px] w-full rounded-xl border px-3 text-xs outline-none ${
+                        isDark
+                          ? 'border-white/10 bg-white/5 text-white'
+                          : 'border-slate-200 bg-white text-slate-900'
+                      }`}
+                    />
+                  </div>
+
+                  <div className="mt-4 flex justify-end">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        onUpdateDatabase({ ...db, referralPolicy: referralForm });
+                        notify('Referral commission policy saved.');
+                      }}
+                      className="min-h-[42px] rounded-xl bg-indigo-600 px-5 text-xs font-bold text-white"
+                    >
+                      Save Commission Policy
+                    </button>
+                  </div>
+                </div>
+
+                {/* Commission Ledger & Payout Management */}
+                <div
+                  className={`rounded-2xl p-5 ${
+                    isDark ? 'surface-card-dark' : 'surface-card-light'
+                  }`}
+                >
+                  <h3 className="text-sm font-bold">
+                    Student Commission Ledger ({(db.referralCommissions || []).length} records)
+                  </h3>
+                  {(db.referralCommissions || []).length === 0 ? (
+                    <p className="mt-3 text-xs text-slate-400">
+                      No referral commissions recorded yet.
+                    </p>
+                  ) : (
+                    <div className="mt-3 divide-y divide-white/10">
+                      {(db.referralCommissions || []).map((rec: ReferralCommissionRecord) => (
+                        <div
+                          key={rec.id}
+                          className="flex flex-wrap items-center justify-between gap-2 py-3 text-xs"
+                        >
+                          <div>
+                            <p className="font-bold">
+                              Referrer Code:{' '}
+                              <span className="font-mono text-indigo-400">{rec.referrerCode}</span>{' '}
+                              → Referee: {rec.refereeName} ({rec.refereeDeviceId})
+                            </p>
+                            <p className="text-slate-400">
+                              Order: ₹{rec.orderAmount} · Commission:{' '}
+                              <strong className="text-emerald-400">₹{rec.commissionAmount}</strong>
+                              {rec.payoutUpiId ? ` · Payout UPI: ${rec.payoutUpiId}` : ''}
+                            </p>
+                          </div>
+                          <select
+                            value={rec.status}
+                            onChange={(e) => {
+                              const nextStatus = e.target.value as CommissionStatus;
+                              const updated = (db.referralCommissions || []).map((c) =>
+                                c.id === rec.id
+                                  ? { ...c, status: nextStatus, updatedAt: Date.now() }
+                                  : c
+                              );
+                              onUpdateDatabase({ ...db, referralCommissions: updated });
+                              notify(`Commission ${rec.id} status updated to ${nextStatus}.`);
+                            }}
+                            className={`min-h-[36px] rounded-lg border px-2.5 text-xs font-bold ${
+                              isDark
+                                ? 'border-white/15 bg-[#0F172A] text-white'
+                                : 'border-slate-300 bg-white text-slate-900'
+                            }`}
+                          >
+                            <option value="pending">Pending Verification</option>
+                            <option value="approved">Approved</option>
+                            <option value="payable">Payable (Requested)</option>
+                            <option value="paid">Paid / Settled</option>
+                            <option value="rejected">Rejected (Fraud/Invalid)</option>
+                            <option value="reversed">Reversed / Refunded</option>
+                          </select>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* ================================================================
+                PHASES 4 & 5: STUDENT FEEDBACK INBOX & SUPPORT TICKET DESK
+               ================================================================ */}
+            {activeSection === 'support' && (
+              <div className="space-y-6">
+                <div>
+                  <h2 className="text-lg font-bold">
+                    Student Support Desk, Contact Details & Feedback Inbox
+                  </h2>
+                  <p className="text-xs text-slate-400">
+                    Manage official Customer Care channels, respond to student Support Tickets, and review Test Feedback.
+                  </p>
+                </div>
+
+                {/* Official Support Contact Config */}
+                <div
+                  className={`rounded-2xl p-5 ${
+                    isDark ? 'surface-card-dark' : 'surface-card-light'
+                  }`}
+                >
+                  <h3 className="text-sm font-bold">Customer Care & Contact Us Channels</h3>
+                  <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
+                    <input
+                      type="email"
+                      value={supportForm.supportEmail}
+                      onChange={(e) =>
+                        setSupportForm({ ...supportForm, supportEmail: e.target.value })
+                      }
+                      placeholder="Support Email (support@zyvra.in)"
+                      className={`min-h-[42px] rounded-xl border px-3 text-xs outline-none ${
+                        isDark
+                          ? 'border-white/10 bg-white/5 text-white'
+                          : 'border-slate-200 bg-white text-slate-900'
+                      }`}
+                    />
+                    <input
+                      type="text"
+                      value={supportForm.helplineNumber}
+                      onChange={(e) =>
+                        setSupportForm({ ...supportForm, helplineNumber: e.target.value })
+                      }
+                      placeholder="Helpline Phone (+91-...)"
+                      className={`min-h-[42px] rounded-xl border px-3 text-xs outline-none ${
+                        isDark
+                          ? 'border-white/10 bg-white/5 text-white'
+                          : 'border-slate-200 bg-white text-slate-900'
+                      }`}
+                    />
+                    <input
+                      type="text"
+                      value={supportForm.whatsappSupport}
+                      onChange={(e) =>
+                        setSupportForm({ ...supportForm, whatsappSupport: e.target.value })
+                      }
+                      placeholder="WhatsApp Support Number"
+                      className={`min-h-[42px] rounded-xl border px-3 text-xs outline-none ${
+                        isDark
+                          ? 'border-white/10 bg-white/5 text-white'
+                          : 'border-slate-200 bg-white text-slate-900'
+                      }`}
+                    />
+                    <input
+                      type="text"
+                      value={supportForm.workingHours}
+                      onChange={(e) =>
+                        setSupportForm({ ...supportForm, workingHours: e.target.value })
+                      }
+                      placeholder="Working Hours"
+                      className={`min-h-[42px] rounded-xl border px-3 text-xs outline-none ${
+                        isDark
+                          ? 'border-white/10 bg-white/5 text-white'
+                          : 'border-slate-200 bg-white text-slate-900'
+                      }`}
+                    />
+                  </div>
+                  <div className="mt-3 flex justify-end">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        onUpdateDatabase({ ...db, supportConfig: supportForm });
+                        notify('Customer Care contact settings updated.');
+                      }}
+                      className="min-h-[40px] rounded-xl bg-indigo-600 px-5 text-xs font-bold text-white"
+                    >
+                      Save Contact Channels
+                    </button>
+                  </div>
+                </div>
+
+                {/* Support Tickets Queue */}
+                <div
+                  className={`rounded-2xl p-5 ${
+                    isDark ? 'surface-card-dark' : 'surface-card-light'
+                  }`}
+                >
+                  <h3 className="text-sm font-bold">
+                    Student Support Tickets ({(db.supportTickets || []).length})
+                  </h3>
+                  {(db.supportTickets || []).length === 0 ? (
+                    <p className="mt-3 text-xs text-slate-400">No support tickets raised yet.</p>
+                  ) : (
+                    <div className="mt-3 space-y-3">
+                      {(db.supportTickets || []).map((tkt: SupportTicket) => (
+                        <div
+                          key={tkt.id}
+                          className={`rounded-xl border p-4 text-xs ${
+                            isDark
+                              ? 'border-white/10 bg-white/[0.02]'
+                              : 'border-slate-200 bg-slate-50'
+                          }`}
+                        >
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <div>
+                              <span className="font-mono font-bold text-indigo-400">{tkt.id}</span>{' '}
+                              · <strong>{tkt.subject}</strong> ({tkt.studentName} · {tkt.deviceId})
+                            </div>
+                            <select
+                              value={tkt.status}
+                              onChange={(e) => {
+                                const nextStatus = e.target.value as SupportTicket['status'];
+                                const updated = (db.supportTickets || []).map((item) =>
+                                  item.id === tkt.id
+                                    ? { ...item, status: nextStatus, updatedAt: Date.now() }
+                                    : item
+                                );
+                                onUpdateDatabase({ ...db, supportTickets: updated });
+                                notify(`Ticket ${tkt.id} marked as ${nextStatus}.`);
+                              }}
+                              className={`rounded-lg border px-2.5 py-1 text-xs font-bold ${
+                                isDark
+                                  ? 'border-white/15 bg-[#0F172A] text-white'
+                                  : 'border-slate-300 bg-white text-slate-900'
+                              }`}
+                            >
+                              <option value="open">Open</option>
+                              <option value="in_progress">In Progress</option>
+                              <option value="resolved">Resolved</option>
+                              <option value="closed">Closed</option>
+                            </select>
+                          </div>
+                          <p className="mt-1.5 text-slate-300">{tkt.message}</p>
+
+                          {/* Existing Replies */}
+                          {(tkt.replies || []).length > 0 && (
+                            <div className="mt-2 space-y-1.5 border-l-2 border-indigo-500/40 pl-3">
+                              {tkt.replies.map((r) => (
+                                <p key={r.id} className="text-[11px] text-slate-400">
+                                  <strong className="text-indigo-300">{r.authorName}:</strong>{' '}
+                                  {r.message}
+                                </p>
+                              ))}
+                            </div>
+                          )}
+
+                          {/* Admin Reply Input */}
+                          <div className="mt-3 flex gap-2">
+                            <input
+                              type="text"
+                              value={ticketReplyInputs[tkt.id] || ''}
+                              onChange={(e) =>
+                                setTicketReplyInputs({
+                                  ...ticketReplyInputs,
+                                  [tkt.id]: e.target.value,
+                                })
+                              }
+                              placeholder="Write official reply to student..."
+                              className={`min-h-[36px] flex-1 rounded-lg border px-3 text-xs outline-none ${
+                                isDark
+                                  ? 'border-white/10 bg-[#0A0E17] text-white'
+                                  : 'border-slate-200 bg-white text-slate-900'
+                              }`}
+                            />
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const msg = (ticketReplyInputs[tkt.id] || '').trim();
+                                if (!msg) return;
+                                const updated = (db.supportTickets || []).map((item) =>
+                                  item.id === tkt.id
+                                    ? {
+                                        ...item,
+                                        status: 'resolved' as const,
+                                        updatedAt: Date.now(),
+                                        replies: [
+                                          ...(item.replies || []),
+                                          {
+                                            id: `RPL-${Date.now()}`,
+                                            authorRole: 'admin' as const,
+                                            authorName: 'Zyvra Support Desk',
+                                            message: msg,
+                                            timestamp: Date.now(),
+                                          },
+                                        ],
+                                      }
+                                    : item
+                                );
+                                onUpdateDatabase({ ...db, supportTickets: updated });
+                                setTicketReplyInputs({ ...ticketReplyInputs, [tkt.id]: '' });
+                                notify(`Reply sent for ticket ${tkt.id}.`);
+                              }}
+                              className="inline-flex min-h-[36px] items-center gap-1 rounded-lg bg-indigo-600 px-3 text-xs font-bold text-white"
+                            >
+                              <Send className="h-3 w-3" />
+                              Reply
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                {/* Student Test Feedback Inbox (Phase 4) */}
+                <div
+                  className={`rounded-2xl p-5 ${
+                    isDark ? 'surface-card-dark' : 'surface-card-light'
+                  }`}
+                >
+                  <h3 className="text-sm font-bold">
+                    Student Test Feedback Inbox ({(db.feedbackList || []).length})
+                  </h3>
+                  {(db.feedbackList || []).length === 0 ? (
+                    <p className="mt-3 text-xs text-slate-400">
+                      No student test feedback entries submitted yet.
+                    </p>
+                  ) : (
+                    <div className="mt-3 divide-y divide-white/10">
+                      {(db.feedbackList || []).map((fb: StudentFeedbackItem) => (
+                        <div
+                          key={fb.id}
+                          className="flex flex-wrap items-center justify-between gap-2 py-3 text-xs"
+                        >
+                          <div>
+                            <div className="flex items-center gap-2">
+                              <span className="font-bold text-amber-400">
+                                {'★'.repeat(fb.rating)}
+                              </span>
+                              <span className="font-semibold">{fb.studentName}</span>
+                              <span className="text-slate-400">
+                                ({fb.packTitle || 'General App'} · {fb.category})
+                              </span>
+                            </div>
+                            <p className="mt-1 text-slate-300">{fb.message}</p>
+                          </div>
+                          <select
+                            value={fb.status}
+                            onChange={(e) => {
+                              const nextSt = e.target.value as StudentFeedbackItem['status'];
+                              const updated = (db.feedbackList || []).map((item) =>
+                                item.id === fb.id ? { ...item, status: nextSt } : item
+                              );
+                              onUpdateDatabase({ ...db, feedbackList: updated });
+                            }}
+                            className={`rounded-lg border px-2.5 py-1 text-xs font-bold ${
+                              isDark
+                                ? 'border-white/15 bg-[#0F172A] text-white'
+                                : 'border-slate-300 bg-white text-slate-900'
+                            }`}
+                          >
+                            <option value="new">New</option>
+                            <option value="reviewed">Reviewed</option>
+                            <option value="resolved">Resolved</option>
+                          </select>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
               </div>
             )}

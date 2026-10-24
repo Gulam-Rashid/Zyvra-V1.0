@@ -283,6 +283,211 @@ export interface PYQTrendTopic {
 
 export type PYQTrendRow = PYQTrendTopic;
 
+export interface TestCustomizationRules {
+  customizationAllowed: boolean;
+  allowModeSwitch: boolean;
+  allowTimerChange: boolean;
+  allowQuestionCountChange: boolean;
+  allowCategoryFilter: boolean;
+  randomizeQuestions: boolean;
+}
+
+export interface DynamicCategoryNode {
+  id: string;
+  name?: string;
+  name_en: string;
+  name_hi: string;
+  slug?: string;
+  description?: string;
+  parentId: string | null; // null = top-level category; non-null = subcategory (supports unlimited nesting)
+  examId?: string; // 'ALL' or specific exam name/id
+  subject?: string;
+  order: number;
+  status: 'active' | 'inactive' | 'archived';
+  createdAt: string | number;
+}
+
+export interface StudentFeedbackItem {
+  id: string;
+  studentName: string;
+  mobile?: string;
+  mobileNumber?: string;
+  deviceId: string;
+  exam?: string;
+  attemptId?: string;
+  testId?: string;
+  testAttemptId?: string;
+  testTitle?: string;
+  packTitle?: string;
+  rating: number;
+  category:
+    | 'test_quality'
+    | 'question_error'
+    | 'ui_ux'
+    | 'translation'
+    | 'other'
+    | 'overall_experience'
+    | 'question_quality'
+    | 'feature_request'
+    | 'ui_bug';
+  message: string;
+  status: 'new' | 'unread' | 'reviewed' | 'resolved';
+  adminResponse?: string;
+  createdAt: string | number;
+  updatedAt?: string | number;
+}
+
+export interface SupportTicketReply {
+  id: string;
+  senderRole?: 'student' | 'admin';
+  authorRole?: 'student' | 'admin';
+  senderName?: string;
+  authorName?: string;
+  message: string;
+  createdAt?: string | number;
+  timestamp?: string | number;
+}
+
+export interface SupportTicket {
+  id: string;
+  ticketCode?: string; // e.g. TKT-482910
+  ticketNumber?: string;
+  studentName: string;
+  mobile?: string;
+  mobileNumber?: string;
+  deviceId: string;
+  exam?: string;
+  category:
+    | 'payment_pro'
+    | 'technical_bug'
+    | 'technical'
+    | 'content_doubt'
+    | 'question_error'
+    | 'account_sync'
+    | 'other';
+  priority?: 'low' | 'medium' | 'high';
+  subject: string;
+  message: string;
+  status: 'open' | 'in_progress' | 'resolved' | 'closed';
+  createdAt: string | number;
+  updatedAt: string | number;
+  replies: SupportTicketReply[];
+}
+
+export interface SupportContactConfig {
+  isConfigured?: boolean;
+  supportEmail: string;
+  helplineNumber: string;
+  whatsappSupport: string;
+  workingHours?: string;
+  workingHours_en?: string;
+  workingHours_hi?: string;
+  supportAddress?: string;
+  responseSlaEn?: string;
+  responseSlaHi?: string;
+  supportNotice_en?: string;
+  supportNotice_hi?: string;
+}
+
+export interface ReferralPolicyConfig {
+  enabled: boolean;
+  commissionType: 'fixed' | 'percent';
+  commissionValue: number;
+  qualifyingEvent?: 'pro_pass_verified' | string;
+  minPayoutThreshold: number;
+  offerStartDate?: string;
+  offerEndDate?: string;
+  termsSummary?: string;
+  terms_en?: string;
+  terms_hi?: string;
+}
+
+export type CommissionStatus =
+  | 'pending'
+  | 'approved'
+  | 'payable'
+  | 'paid'
+  | 'rejected'
+  | 'reversed';
+
+export interface ReferralCommissionRecord {
+  id: string;
+  referrerDeviceId: string;
+  referrerCode?: string;
+  referralCode?: string;
+  referrerName: string;
+  referrerMobile: string;
+  refereeDeviceId?: string;
+  referredDeviceId?: string;
+  refereeName?: string;
+  referredStudentName?: string;
+  refereeMobile?: string;
+  referredMobile?: string;
+  saleId?: string;
+  utrNumber: string;
+  purchaseAmount?: number;
+  orderAmount?: number;
+  commissionType?: 'fixed' | 'percent';
+  commissionRate?: number;
+  commissionAmount: number;
+  status: CommissionStatus;
+  payoutMethod?: 'upi' | 'bank_manual';
+  payoutUpiId?: string;
+  payoutDetails?: string;
+  payoutReference?: string;
+  adminNote?: string;
+  createdAt: string | number;
+  updatedAt?: string | number;
+}
+
+export interface ReferralAttribution {
+  id: string;
+  referrerCode: string;
+  referrerDeviceId: string;
+  refereeDeviceId: string;
+  refereeName: string;
+  refereeMobile: string;
+  status: 'attributed' | 'qualified' | 'invalid';
+  createdAt: string | number;
+}
+
+export type OfferTemplateId =
+  | 'royal_indigo'
+  | 'emerald_scholar'
+  | 'amber_festive'
+  | 'crimson_urgent';
+
+export interface PromotionalOfferItem {
+  id: string;
+  title?: string;
+  title_en?: string;
+  title_hi?: string;
+  subtitle?: string;
+  subtitle_en?: string;
+  subtitle_hi?: string;
+  description_en?: string;
+  description_hi?: string;
+  badgeText?: string;
+  discountText?: string;
+  ctaText?: string;
+  priority?: number;
+  templateId: OfferTemplateId;
+  discountType?: 'flat' | 'percent';
+  discountValue?: number;
+  discountPercent?: number;
+  originalPrice?: number;
+  finalPrice?: number;
+  couponCode?: string;
+  bannerImageUrl?: string;
+  validFrom: string;
+  validUntil: string;
+  targetExam?: string;
+  targetDestination?: 'pro_modal' | 'tests' | 'practice' | 'study';
+  isActive?: boolean;
+  active?: boolean;
+  createdAt?: string | number;
+}
+
 export interface TestSeriesPack {
   id: string;
   title_en: string;
@@ -292,6 +497,11 @@ export interface TestSeriesPack {
   stageId?: string;
   paperId?: string;
   category: 'pyq' | 'guess' | 'sectional' | 'topic';
+  categoryId?: string;
+  subcategoryId?: string;
+  subcategoryIds?: string[];
+  dynamicCategoryId?: string;
+  dynamicSubcategoryId?: string;
   folderId: string;
   subject: string;
   questionIds: string[];
@@ -302,6 +512,7 @@ export interface TestSeriesPack {
   shiftTag: string;
   sourceClassification?: QuestionSourceClassification;
   isPro: boolean;
+  customizationRules?: TestCustomizationRules;
 }
 
 export interface StudentSaleLog {
@@ -313,6 +524,9 @@ export interface StudentSaleLog {
   amountPaid: number;
   couponUsed?: string;
   couponCode?: string;
+  referredByCode?: string;
+  referralCodeUsed?: string;
+  paymentStatus?: 'verified' | 'refunded' | 'cancelled';
   proKey?: string;
   generatedProKey?: string;
   unlockedScope?: string;
@@ -338,7 +552,14 @@ export interface ImportBatchHistory {
 export interface SyncAuditLog {
   id: string;
   timestamp: string;
-  action: 'push' | 'pull' | 'migration' | 'backup' | 'push_github' | 'pull_github';
+  action:
+    | 'push'
+    | 'pull'
+    | 'migration'
+    | 'backup'
+    | 'push_github'
+    | 'pull_github'
+    | 'cloud_sync';
   status: 'success' | 'failed';
   summary: string;
   examsCount?: number;
@@ -355,6 +576,7 @@ export interface MasterDatabase {
   subjects: Record<string, string[]>;
   examSubjectsMap?: Record<string, string[]>;
   subtopicsMap?: Record<string, string[]>;
+  dynamicCategories?: DynamicCategoryNode[];
   folders: CustomFolder[];
   pyqTrends: PYQTrendTopic[];
   trends?: PYQTrendTopic[];
@@ -363,9 +585,17 @@ export interface MasterDatabase {
   notes: StudyNote[];
   flashcards: Flashcard[];
   offers: OfferConfig;
+  promotionalOffers?: PromotionalOfferItem[];
   coupons: CouponCode[];
   salesLog: StudentSaleLog[];
   salesLogs?: StudentSaleLog[];
+  studentFeedback?: StudentFeedbackItem[];
+  feedbackList?: StudentFeedbackItem[];
+  supportTickets?: SupportTicket[];
+  supportConfig?: SupportContactConfig;
+  referralPolicy?: ReferralPolicyConfig;
+  referralAttributions?: ReferralAttribution[];
+  referralCommissions?: ReferralCommissionRecord[];
   importHistory?: ImportBatchHistory[];
   syncAuditLogs?: SyncAuditLog[];
 }
@@ -380,6 +610,10 @@ export interface MistakeEntry {
 
 export interface TestAttemptRecord {
   id: string;
+  attemptId?: string;
+  testId?: string;
+  packId?: string;
+  packTitle?: string;
   testTitle: string;
   exam: string;
   stage?: string;
@@ -387,28 +621,41 @@ export interface TestAttemptRecord {
   stageOrPaper?: string;
   mode: 'practice' | 'exam_hall';
   date: string;
+  timestamp?: number | string;
   totalQuestions: number;
   attempted: number;
   correct: number;
   wrong: number;
   skipped: number;
   marksPerCorrect?: number;
+  score?: number;
   netScore: number;
   maxScore: number;
+  totalMarks?: number;
   negativeMarking: number;
   accuracy: number;
   avgSecondsPerQuestion: number;
   normalizedScore: number | null;
   isOfficialSimulation?: boolean;
+  isFixedTest?: boolean;
   questionIds: string[];
   userAnswers: Record<string, number | null>;
   timeTakenSeconds: number;
+  customizationSnapshot?: {
+    customizedByStudent: boolean;
+    timerType: string;
+    overallMinutes: number;
+    questionCount: number;
+  };
 }
 
 export interface StudentLocalState {
   studentName: string;
   mobileNumber: string;
   deviceId: string;
+  referralCode?: string;
+  referredByCode?: string;
+  payoutUpiId?: string;
   isProUnlocked: boolean;
   unlockedExamIds?: string[];
   unlockedExamPacks?: string[];
@@ -423,6 +670,9 @@ export interface StudentLocalState {
   masteredFlashcardIds: string[];
   mistakes: Record<string, MistakeEntry>;
   testHistory: TestAttemptRecord[];
+  syncStatus?: 'synced' | 'pending' | 'failed';
+  lastSyncedAt?: string;
+  lastCloudSyncedAt?: string | null;
 }
 
 export interface GitHubSyncConfig {
@@ -434,6 +684,8 @@ export interface GitHubSyncConfig {
 }
 
 export interface ActiveTestConfig {
+  testId?: string;
+  packId?: string;
   title: string;
   exam: string;
   stage?: string;
@@ -448,4 +700,6 @@ export interface ActiveTestConfig {
   negativeMarking: number;
   marksPerUnanswered?: number;
   isOfficialSimulation?: boolean;
+  customizationRules?: TestCustomizationRules;
 }
+

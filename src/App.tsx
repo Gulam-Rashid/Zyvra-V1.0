@@ -1,30 +1,45 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
+  ArrowLeft,
   ArrowRight,
   Bookmark,
   BookOpen,
   CheckCircle2,
   ChevronRight,
+  Cloud,
+  CloudOff,
   Compass,
   Copy,
   Download,
   FileText,
   Folder,
+  Gift,
+  Headphones,
   Home,
+  Layers,
   Lock,
+  Menu,
+  MessageSquare,
   Moon,
+  Phone,
   Play,
+  RefreshCw,
   RotateCcw,
   Search,
+  Send,
+  Share2,
   ShieldCheck,
   Sliders,
   Sparkles,
+  Star,
   Sun,
+  Tag,
   Target,
   TrendingUp,
   Trophy,
   User,
   WifiOff,
+  X,
 } from 'lucide-react';
 import { AdminControlCenter } from './components/AdminControlCenter';
 import { PDFReaderModal } from './components/PDFReaderModal';
@@ -37,14 +52,18 @@ import {
   ExamCategory,
   LanguageMode,
   MasterDatabase,
+  OfferTemplateId,
+  StudentFeedbackItem,
   StudentLocalState,
   StudentSaleLog,
   StudyNote,
+  SupportTicket,
   TestAttemptRecord,
   TestSeriesPack,
 } from './types/database';
-import { generateDeviceId } from './utils/cryptoLock';
+import { generateDeviceId, generateReferralCode } from './utils/cryptoLock';
 import {
+  enqueueOfflineSyncItem,
   examStringsMatch,
   getFoldersForExam,
   getNotesForExam,
@@ -52,15 +71,18 @@ import {
   loadMasterDatabase,
   loadStudentState,
   loadThemeMode,
+  pushMasterDatabaseToCloudBackend,
   safeLower,
   saveMasterDatabase,
   saveStudentState,
   saveThemeMode,
+  syncWithCloudBackend,
 } from './utils/storage';
 
 type PrimaryTab = 'home' | 'exams' | 'practice' | 'study' | 'profile';
 type StudySubTab = 'text' | 'pdf' | 'flashcards' | 'bookmarks' | 'mistakes';
 type ExamsSubView = 'series' | 'trends';
+type ProfileSectionView = 'overview' | 'referrals' | 'support';
 
 export function App() {
   // Core Persistent State
@@ -155,10 +177,128 @@ export function App() {
   const [activeNoteReader, setActiveNoteReader] = useState<StudyNote | null>(null);
   const [showProModal, setShowProModal] = useState<boolean>(false);
   const [showAdminModal, setShowAdminModal] = useState<boolean>(false);
+  const [showMobileDrawer, setShowMobileDrawer] = useState<boolean>(false);
   const [adminTapCount, setAdminTapCount] = useState<number>(0);
   const [copiedDeviceToast, setCopiedDeviceToast] = useState<boolean>(false);
+  const [copiedReferralToast, setCopiedReferralToast] = useState<boolean>(false);
+
+  // Navigation History Stack & Profile Sub-Section
+  const [tabHistory, setTabHistory] = useState<PrimaryTab[]>(['home']);
+  const [profileSection, setProfileSection] = useState<ProfileSectionView>('overview');
+  const [selectedDynamicCatId, setSelectedDynamicCatId] = useState<string>('ALL');
+
+  // Cloud Sync State
+  const [isSyncingCloud, setIsSyncingCloud] = useState<boolean>(false);
+
+  // Refer & Earn Form State
+  const [friendReferralInput, setFriendReferralInput] = useState<string>(
+    studentState.referredByCode || ''
+  );
+  const [referralApplyMsg, setReferralApplyMsg] = useState<string>('');
+  const [payoutUpiInput, setPayoutUpiInput] = useState<string>('');
+  const [payoutMsg, setPayoutMsg] = useState<string>('');
+
+  // Support Ticket & General Feedback Form State
+  const [ticketSubject, setTicketSubject] = useState<string>('');
+  const [ticketCategory, setTicketCategory] = useState<SupportTicket['category']>('technical');
+  const [ticketPriority, setTicketPriority] = useState<SupportTicket['priority']>('medium');
+  const [ticketMessage, setTicketMessage] = useState<string>('');
+  const [ticketSubmitToast, setTicketSubmitToast] = useState<string>('');
+
+  const [generalFeedbackRating, setGeneralFeedbackRating] = useState<number>(5);
+  const [generalFeedbackCategory, setGeneralFeedbackCategory] =
+    useState<StudentFeedbackItem['category']>('overall_experience');
+  const [generalFeedbackMsg, setGeneralFeedbackMsg] = useState<string>('');
+  const [generalFeedbackToast, setGeneralFeedbackToast] = useState<string>('');
 
   const isDark = theme === 'dark';
+
+  // Navigate to tab with browser history & back stack support
+  const navigateToTab = useCallback(
+    (nextTab: PrimaryTab, subSection?: ProfileSectionView) => {
+      setActiveTab((prev) => {
+        if (prev !== nextTab) {
+          setTabHistory((hist) => [...hist.slice(-8), nextTab]);
+          try {
+            window.history.pushState({ zyvraTab: nextTab }, '');
+          } catch {
+            // ignore
+          }
+        }
+        return nextTab;
+      });
+      if (subSection) {
+        setProfileSection(subSection);
+      }
+      setShowMobileDrawer(false);
+    },
+    []
+  );
+
+  const handleNavigateBack = useCallback(() => {
+    if (showMobileDrawer) {
+      setShowMobileDrawer(false);
+      return;
+    }
+    if (showExamSwitcherModal) {
+      setShowExamSwitcherModal(false);
+      return;
+    }
+    if (tabHistory.length > 1) {
+      const nextHist = tabHistory.slice(0, -1);
+      const prevTab = nextHist[nextHist.length - 1] || 'home';
+      setTabHistory(nextHist);
+      setActiveTab(prevTab);
+    } else if (activeTab !== 'home') {
+      setActiveTab('home');
+    }
+  }, [showMobileDrawer, showExamSwitcherModal, tabHistory, activeTab]);
+
+  // Listen to hardware / browser back button when no modal is capturing it
+  useEffect(() => {
+    const onPopState = () => {
+      if (!activeTestConfig && !activeNoteReader && !showProModal && !showAdminModal) {
+        handleNavigateBack();
+      }
+    };
+    window.addEventListener('popstate', onPopState);
+    return () => window.removeEventListener('popstate', onPopState);
+  }, [activeTestConfig, activeNoteReader, showProModal, showAdminModal, handleNavigateBack]);
+
+  // Real Cloud Sync Bootstrap & Reconnect Effect
+  const triggerCloudSync = useCallback(async () => {
+    setIsSyncingCloud(true);
+    try {
+      const res = await syncWithCloudBackend();
+      setDb(res.db);
+      setStudentState(res.student);
+    } finally {
+      setIsSyncingCloud(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    triggerCloudSync();
+  }, [triggerCloudSync]);
+
+  useEffect(() => {
+    if (isOnline) {
+      triggerCloudSync();
+    }
+  }, [isOnline, triggerCloudSync]);
+
+  // Parse ?ref=ZYVREF-XXXX from URL if present
+  useEffect(() => {
+    try {
+      const params = new URLSearchParams(window.location.search);
+      const urlRef = params.get('ref');
+      if (urlRef && !studentState.referredByCode && urlRef !== studentState.referralCode) {
+        setFriendReferralInput(urlRef.toUpperCase());
+      }
+    } catch {
+      // ignore
+    }
+  }, [studentState.referredByCode, studentState.referralCode]);
 
   // Sync theme & student state
   const handleToggleTheme = () => {
@@ -173,9 +313,27 @@ export function App() {
     );
   };
 
+  const persistAndQueueStudentState = (updated: StudentLocalState) => {
+    const withPending: StudentLocalState = {
+      ...updated,
+      syncStatus: isOnline ? 'synced' : 'pending',
+      lastSyncedAt: new Date().toISOString(),
+    };
+    setStudentState(withPending);
+    saveStudentState(withPending);
+    enqueueOfflineSyncItem('student_state', withPending);
+    if (isOnline) {
+      syncWithCloudBackend().then((res) => {
+        setDb(res.db);
+        setStudentState(res.student);
+      });
+    }
+  };
+
   const handleSelectExam = (examName: string) => {
     setSelectedExam(examName);
     setSelectedFolderId('ALL');
+    setSelectedDynamicCatId('ALL');
     setCustomSubject('ALL');
     setCustomTopic('ALL');
     setCustomFolderId('ALL');
@@ -187,15 +345,15 @@ export function App() {
       selectedExamName: examName,
       recentExamNames: recents,
     };
-    setStudentState(updated);
-    saveStudentState(updated);
+    persistAndQueueStudentState(updated);
     setShowExamSwitcherModal(false);
   };
 
-  // Update Database from Admin
+  // Update Database from Admin & push to Cloud
   const handleUpdateDatabase = (updatedDb: MasterDatabase) => {
     setDb(updatedDb);
     saveMasterDatabase(updatedDb);
+    pushMasterDatabaseToCloudBackend(updatedDb);
   };
 
   // Scoped Data for Currently Selected Exam
@@ -252,6 +410,38 @@ export function App() {
     });
   }, [db.pyqTrends, selectedExam, trendSubjectFilter, trendSearch]);
 
+  // Active Dynamic Categories for Current Exam
+  const examDynamicCategories = useMemo(() => {
+    return (db.dynamicCategories || [])
+      .filter(
+        (cat) =>
+          cat.status === 'active' &&
+          (!cat.examId ||
+            cat.examId === 'ALL' ||
+            examStringsMatch(cat.examId, selectedExam) ||
+            examStringsMatch(cat.examId, currentExamObj?.id))
+      )
+      .sort((a, b) => a.order - b.order);
+  }, [db.dynamicCategories, selectedExam, currentExamObj]);
+
+  // Active Promotional Offers for Current Exam
+  const activePromotionalOffers = useMemo(() => {
+    const today = new Date().toISOString().slice(0, 10);
+    return (db.promotionalOffers || []).filter((off) => {
+      if (!off.isActive) return false;
+      if (off.validFrom && off.validFrom > today) return false;
+      if (off.validUntil && off.validUntil < today) return false;
+      if (
+        off.targetExam &&
+        off.targetExam !== 'ALL' &&
+        !examStringsMatch(off.targetExam, selectedExam)
+      ) {
+        return false;
+      }
+      return true;
+    });
+  }, [db.promotionalOffers, selectedExam]);
+
   // Filtered Test Series Packs
   const filteredTestPacks = useMemo(() => {
     return (db.testSeries || []).filter((pack) => {
@@ -260,9 +450,13 @@ export function App() {
       const matchesFolder = selectedFolderId === 'ALL' || pack.folderId === selectedFolderId;
       const matchesCat =
         seriesCategoryFilter === 'ALL' || pack.category === seriesCategoryFilter;
-      return matchesExam && matchesFolder && matchesCat;
+      const matchesDynCat =
+        selectedDynamicCatId === 'ALL' ||
+        pack.dynamicCategoryId === selectedDynamicCatId ||
+        pack.dynamicSubcategoryId === selectedDynamicCatId;
+      return matchesExam && matchesFolder && matchesCat && matchesDynCat;
     });
-  }, [db.testSeries, selectedExam, selectedFolderId, seriesCategoryFilter]);
+  }, [db.testSeries, selectedExam, selectedFolderId, seriesCategoryFilter, selectedDynamicCatId]);
 
   // Custom Test Builder Matching Question Pool
   const customBuilderPool = useMemo(() => {
@@ -368,6 +562,7 @@ export function App() {
     const finalQs = packQs.length > 0 ? packQs : fallbackQs;
 
     setActiveTestConfig({
+      packId: pack.id,
       title: language === 'hi' ? pack.title_hi : pack.title_en,
       exam: pack.exam || selectedExam,
       stage: selectedStage !== 'ALL' ? selectedStage : currentExamObj?.stages?.[0]?.name,
@@ -380,6 +575,7 @@ export function App() {
       negativeMarking: pack.negativeMarking ?? currentExamObj?.negativeMarking ?? 0.5,
       marksPerUnanswered: 0,
       isOfficialSimulation: true,
+      customizationRules: pack.customizationRules,
     });
   };
 
@@ -490,8 +686,148 @@ export function App() {
       mistakes: nextMistakes,
       testHistory: [record, ...(studentState.testHistory || [])].slice(0, 50),
     };
-    setStudentState(updatedState);
-    saveStudentState(updatedState);
+    persistAndQueueStudentState(updatedState);
+  };
+
+  const handleSubmitTestFeedback = async (feedbackPayload: {
+    testAttemptId?: string;
+    attemptId?: string;
+    testTitle?: string;
+    packTitle?: string;
+    exam?: string;
+    rating: number;
+    category: StudentFeedbackItem['category'];
+    message: string;
+  }) => {
+    const newItem: StudentFeedbackItem = {
+      id: `fb-${Date.now()}`,
+      studentName: studentState.studentName,
+      mobile: studentState.mobileNumber,
+      deviceId: studentState.deviceId,
+      testAttemptId: feedbackPayload.testAttemptId || feedbackPayload.attemptId,
+      testTitle: feedbackPayload.testTitle || feedbackPayload.packTitle,
+      exam: feedbackPayload.exam || selectedExam,
+      rating: feedbackPayload.rating,
+      category: feedbackPayload.category,
+      message: feedbackPayload.message,
+      status: 'unread',
+      createdAt: new Date().toLocaleString('en-IN'),
+    };
+    const nextDb: MasterDatabase = {
+      ...db,
+      studentFeedback: [newItem, ...(db.studentFeedback || [])],
+    };
+    setDb(nextDb);
+    saveMasterDatabase(nextDb);
+    enqueueOfflineSyncItem('feedback', newItem);
+    try {
+      await fetch('/api/feedback', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(newItem),
+      });
+    } catch {
+      // queued in offline sync queue
+    }
+  };
+
+  const handleCreateSupportTicket = async () => {
+    if (!ticketSubject.trim() || !ticketMessage.trim()) return;
+    const newTicket: SupportTicket = {
+      id: `tkt-${Date.now()}`,
+      ticketNumber: `TKT-${Math.floor(100000 + Math.random() * 900000)}`,
+      studentName: studentState.studentName,
+      mobile: studentState.mobileNumber,
+      deviceId: studentState.deviceId,
+      category: ticketCategory,
+      subject: ticketSubject.trim(),
+      message: ticketMessage.trim(),
+      status: 'open',
+      priority: ticketPriority,
+      createdAt: new Date().toLocaleString('en-IN'),
+      updatedAt: new Date().toLocaleString('en-IN'),
+      replies: [],
+    };
+    const nextDb: MasterDatabase = {
+      ...db,
+      supportTickets: [newTicket, ...(db.supportTickets || [])],
+    };
+    setDb(nextDb);
+    saveMasterDatabase(nextDb);
+    enqueueOfflineSyncItem('ticket', newTicket);
+    setTicketSubject('');
+    setTicketMessage('');
+    setTicketSubmitToast(`Ticket ${newTicket.ticketNumber} created!`);
+    setTimeout(() => setTicketSubmitToast(''), 4000);
+    try {
+      await fetch('/api/support/tickets', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(newTicket),
+      });
+    } catch {
+      // queued in offline sync queue
+    }
+  };
+
+  const handleApplyReferralCode = async () => {
+    const cleanCode = friendReferralInput.trim().toUpperCase();
+    if (!cleanCode) return;
+    if (cleanCode === studentState.referralCode) {
+      setReferralApplyMsg('Self-referral is blocked.');
+      return;
+    }
+    try {
+      const res = await fetch('/api/referrals/apply', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          referralCode: cleanCode,
+          referredStudentName: studentState.studentName,
+          referredMobile: studentState.mobileNumber,
+          referredDeviceId: studentState.deviceId,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setReferralApplyMsg(data.error || 'Could not apply referral code.');
+        return;
+      }
+      const updated = { ...studentState, referredByCode: cleanCode };
+      persistAndQueueStudentState(updated);
+      setReferralApplyMsg('Referral code linked! Qualifying purchase rewards your referrer.');
+    } catch {
+      const updated = { ...studentState, referredByCode: cleanCode };
+      persistAndQueueStudentState(updated);
+      setReferralApplyMsg('Saved locally and queued for verification.');
+    }
+  };
+
+  const handleRequestReferralPayout = async () => {
+    if (!payoutUpiInput.trim()) {
+      setPayoutMsg('Please enter your UPI ID for payout.');
+      return;
+    }
+    try {
+      const res = await fetch('/api/referrals/payout-request', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          referrerDeviceId: studentState.deviceId,
+          referralCode: studentState.referralCode,
+          upiId: payoutUpiInput.trim(),
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setPayoutMsg(data.error || 'Minimum payout threshold not met yet.');
+        return;
+      }
+      setPayoutMsg(`Payout request submitted for ₹${data.totalRequested}!`);
+      triggerCloudSync();
+    } catch {
+      setPayoutMsg('Connect to internet to submit live payout request.');
+    }
   };
 
   const handleToggleBookmarkQuestion = (questionId: string) => {
@@ -500,8 +836,7 @@ export function App() {
       ? studentState.bookmarkedQuestionIds.filter((id) => id !== questionId)
       : [questionId, ...studentState.bookmarkedQuestionIds];
     const updated = { ...studentState, bookmarkedQuestionIds: nextIds };
-    setStudentState(updated);
-    saveStudentState(updated);
+    persistAndQueueStudentState(updated);
   };
 
   const handleToggleBookmarkNote = (noteId: string) => {
@@ -510,20 +845,20 @@ export function App() {
       ? studentState.bookmarkedNoteIds.filter((id) => id !== noteId)
       : [noteId, ...studentState.bookmarkedNoteIds];
     const updated = { ...studentState, bookmarkedNoteIds: nextIds };
-    setStudentState(updated);
-    saveStudentState(updated);
+    persistAndQueueStudentState(updated);
   };
 
   const handleUpdateStudentIdentity = (name: string, mobile: string) => {
     const newDevice = generateDeviceId(mobile);
+    const newRefCode = generateReferralCode(newDevice);
     const updated: StudentLocalState = {
       ...studentState,
       studentName: name,
       mobileNumber: mobile,
       deviceId: newDevice,
+      referralCode: newRefCode,
     };
-    setStudentState(updated);
-    saveStudentState(updated);
+    persistAndQueueStudentState(updated);
   };
 
   const handleProUnlockSuccess = (
@@ -538,8 +873,7 @@ export function App() {
       activatedProKey: proKey,
       activatedAt: new Date().toLocaleString('en-IN'),
     };
-    setStudentState(updatedStudent);
-    saveStudentState(updatedStudent);
+    persistAndQueueStudentState(updatedStudent);
 
     const newSale: StudentSaleLog = {
       id: `sale-${Date.now()}`,
@@ -553,11 +887,29 @@ export function App() {
       generatedProKey: proKey,
       unlockedScope: 'Universal All-Exams Pro',
       activatedAt: new Date().toLocaleString('en-IN'),
+      referredByCode: studentState.referredByCode,
     };
     handleUpdateDatabase({
       ...db,
       salesLog: [newSale, ...(db.salesLog || [])],
     });
+
+    if (studentState.referredByCode) {
+      fetch('/api/referrals/qualify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          referralCode: studentState.referredByCode,
+          referredStudentName: studentState.studentName,
+          referredMobile: studentState.mobileNumber,
+          referredDeviceId: studentState.deviceId,
+          purchaseAmount: amountPaid,
+          utrNumber,
+        }),
+      })
+        .then(() => triggerCloudSync())
+        .catch(() => {});
+    }
   };
 
   // Discreet 5-Tap Gesture on Zyvra Logo in Profile Area (Discovery mechanism only)
@@ -622,7 +974,7 @@ export function App() {
       )}
 
       {/* ==========================================================================
-          STICKY TOP BAR (3-Zone Desktop Contract + Mobile Compact Header)
+          STICKY TOP BAR (3-Zone Desktop Contract + Mobile Compact Header + Drawer)
          ========================================================================== */}
       <header
         className={`sticky top-0 z-30 h-16 border-b px-3 sm:px-6 ${
@@ -630,11 +982,43 @@ export function App() {
         }`}
       >
         <div className="mx-auto flex h-full max-w-6xl items-center justify-between gap-2 sm:gap-3">
-          {/* Zone 1 (Left): Zyvra Brand Logo + Active Exam Switcher */}
-          <div className="flex min-w-0 flex-1 items-center gap-1.5 overflow-hidden sm:gap-3">
+          {/* Zone 1 (Left): Hamburger Menu + Back Button + Zyvra Brand Logo + Exam Switcher */}
+          <div className="flex min-w-0 flex-1 items-center gap-1.5 overflow-hidden sm:gap-2.5">
+            {/* Hamburger Menu Button */}
             <button
               type="button"
-              onClick={() => setActiveTab('home')}
+              onClick={() => setShowMobileDrawer(true)}
+              className={`inline-flex min-h-[38px] min-w-[38px] shrink-0 items-center justify-center rounded-xl border transition ${
+                isDark
+                  ? 'border-white/10 bg-white/[0.04] text-slate-200 hover:bg-white/10'
+                  : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-100'
+              }`}
+              title="Open Navigation Menu"
+              aria-label="Open Navigation Menu"
+            >
+              <Menu className="h-4 w-4" />
+            </button>
+
+            {/* Contextual Back Button when not on Home */}
+            {activeTab !== 'home' && (
+              <button
+                type="button"
+                onClick={handleNavigateBack}
+                className={`inline-flex min-h-[38px] min-w-[38px] shrink-0 items-center justify-center rounded-xl border transition ${
+                  isDark
+                    ? 'border-white/10 bg-white/[0.04] text-slate-200 hover:bg-white/10'
+                    : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-100'
+                }`}
+                title="Go Back"
+                aria-label="Go Back"
+              >
+                <ArrowLeft className="h-4 w-4" />
+              </button>
+            )}
+
+            <button
+              type="button"
+              onClick={() => navigateToTab('home')}
               className="shrink-0 text-left focus:outline-none"
               title="Zyvra Home"
             >
@@ -645,7 +1029,7 @@ export function App() {
             <button
               type="button"
               onClick={() => setShowExamSwitcherModal(true)}
-              className={`inline-flex min-h-[36px] min-w-0 max-w-[112px] shrink items-center gap-1 overflow-hidden whitespace-nowrap rounded-xl border px-2 py-1.5 text-xs font-bold transition sm:min-h-[38px] sm:max-w-[190px] sm:gap-1.5 sm:px-3 ${
+              className={`inline-flex min-h-[36px] min-w-0 max-w-[108px] shrink items-center gap-1 overflow-hidden whitespace-nowrap rounded-xl border px-2 py-1.5 text-xs font-bold transition sm:min-h-[38px] sm:max-w-[180px] sm:gap-1.5 sm:px-3 ${
                 isDark
                   ? 'border-white/10 bg-white/[0.04] text-slate-100 hover:bg-white/10'
                   : 'border-slate-200 bg-slate-100 text-slate-900 hover:bg-slate-200/70'
@@ -666,7 +1050,7 @@ export function App() {
                 <button
                   key={item.id}
                   type="button"
-                  onClick={() => setActiveTab(item.id)}
+                  onClick={() => navigateToTab(item.id)}
                   className={`inline-flex min-h-[40px] items-center gap-2 rounded-xl px-3.5 py-2 text-xs font-bold transition ${
                     isActive
                       ? 'bg-indigo-600 text-white'
@@ -682,8 +1066,43 @@ export function App() {
             })}
           </nav>
 
-          {/* Zone 3 (Right): PWA Install, Language, Theme & Pro Status */}
+          {/* Zone 3 (Right): Cloud Sync Status, PWA Install, Language, Theme & Pro Status */}
           <div className="flex shrink-0 items-center gap-1.5 sm:gap-2">
+            {/* Real Cloud Sync Badge */}
+            <button
+              type="button"
+              onClick={triggerCloudSync}
+              className={`inline-flex min-h-[36px] items-center gap-1 rounded-xl border px-2 py-1 text-[11px] font-bold transition sm:min-h-[38px] sm:px-2.5 ${
+                studentState.syncStatus === 'synced' && isOnline
+                  ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-400'
+                  : studentState.syncStatus === 'failed'
+                  ? 'border-rose-500/30 bg-rose-500/10 text-rose-400'
+                  : 'border-amber-500/30 bg-amber-500/10 text-amber-400'
+              }`}
+              title={
+                studentState.syncStatus === 'synced' && isOnline
+                  ? `Cloud Synced (${studentState.lastSyncedAt || 'Live'})`
+                  : 'Sync Pending — Tap to Sync with Cloud'
+              }
+            >
+              {isSyncingCloud ? (
+                <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+              ) : studentState.syncStatus === 'synced' && isOnline ? (
+                <Cloud className="h-3.5 w-3.5" />
+              ) : (
+                <CloudOff className="h-3.5 w-3.5" />
+              )}
+              <span className="hidden md:inline">
+                {isSyncingCloud
+                  ? 'Syncing...'
+                  : studentState.syncStatus === 'synced' && isOnline
+                  ? 'Synced'
+                  : studentState.syncStatus === 'failed'
+                  ? 'Sync Failed'
+                  : 'Sync Pending'}
+              </span>
+            </button>
+
             {!isInstalled && isInstallable && (
               <button
                 type="button"
@@ -740,6 +1159,137 @@ export function App() {
           </div>
         </div>
       </header>
+
+      {/* ==========================================================================
+          SLIDE-OUT HAMBURGER NAVIGATION DRAWER (MOBILE & DESKTOP)
+         ========================================================================== */}
+      {showMobileDrawer && (
+        <div className="fixed inset-0 z-50 flex bg-black/70 backdrop-blur-sm">
+          <div
+            className={`flex h-full w-80 max-w-[85vw] flex-col justify-between border-r p-5 ${
+              isDark
+                ? 'border-white/10 bg-[#0F1624] text-slate-100'
+                : 'border-slate-200 bg-white text-slate-900'
+            }`}
+          >
+            <div className="space-y-5 overflow-y-auto">
+              <div className="flex items-center justify-between border-b pb-4 border-white/10">
+                <ZyvraLogo size="md" showTagline={true} />
+                <button
+                  type="button"
+                  onClick={() => setShowMobileDrawer(false)}
+                  className="inline-flex h-9 w-9 items-center justify-center rounded-xl border border-white/10"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+
+              {/* Active Student Identity */}
+              <div className="rounded-xl border border-indigo-500/20 bg-indigo-500/10 p-3.5">
+                <p className="text-xs font-bold text-indigo-400">{studentState.studentName}</p>
+                <p className="mt-0.5 text-[11px] text-slate-400 tabular-nums">
+                  Target: {selectedExam} · ID: {studentState.deviceId}
+                </p>
+              </div>
+
+              {/* Drawer Navigation Links */}
+              <div className="space-y-1">
+                <button
+                  type="button"
+                  onClick={() => navigateToTab('home')}
+                  className={`flex min-h-[44px] w-full items-center gap-3 rounded-xl px-3.5 text-xs font-bold ${
+                    activeTab === 'home' ? 'bg-indigo-600 text-white' : 'hover:bg-white/5'
+                  }`}
+                >
+                  <Home className="h-4 w-4" />
+                  <span>Home Dashboard</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => navigateToTab('exams')}
+                  className={`flex min-h-[44px] w-full items-center gap-3 rounded-xl px-3.5 text-xs font-bold ${
+                    activeTab === 'exams' ? 'bg-indigo-600 text-white' : 'hover:bg-white/5'
+                  }`}
+                >
+                  <Compass className="h-4 w-4" />
+                  <span>Exams, Test Series & PYQs</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => navigateToTab('practice')}
+                  className={`flex min-h-[44px] w-full items-center gap-3 rounded-xl px-3.5 text-xs font-bold ${
+                    activeTab === 'practice' ? 'bg-indigo-600 text-white' : 'hover:bg-white/5'
+                  }`}
+                >
+                  <Sliders className="h-4 w-4" />
+                  <span>Custom Practice Builder</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => navigateToTab('study')}
+                  className={`flex min-h-[44px] w-full items-center gap-3 rounded-xl px-3.5 text-xs font-bold ${
+                    activeTab === 'study' ? 'bg-indigo-600 text-white' : 'hover:bg-white/5'
+                  }`}
+                >
+                  <BookOpen className="h-4 w-4" />
+                  <span>Study Notes, PDFs & Flashcards</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => navigateToTab('profile', 'referrals')}
+                  className={`flex min-h-[44px] w-full items-center gap-3 rounded-xl px-3.5 text-xs font-bold ${
+                    activeTab === 'profile' && profileSection === 'referrals'
+                      ? 'bg-indigo-600 text-white'
+                      : 'hover:bg-white/5'
+                  }`}
+                >
+                  <Gift className="h-4 w-4 text-amber-400" />
+                  <span>Refer & Earn Rewards</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => navigateToTab('profile', 'support')}
+                  className={`flex min-h-[44px] w-full items-center gap-3 rounded-xl px-3.5 text-xs font-bold ${
+                    activeTab === 'profile' && profileSection === 'support'
+                      ? 'bg-indigo-600 text-white'
+                      : 'hover:bg-white/5'
+                  }`}
+                >
+                  <Headphones className="h-4 w-4 text-cyan-400" />
+                  <span>Support, Contact & Feedback</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => navigateToTab('profile', 'overview')}
+                  className={`flex min-h-[44px] w-full items-center gap-3 rounded-xl px-3.5 text-xs font-bold ${
+                    activeTab === 'profile' && profileSection === 'overview'
+                      ? 'bg-indigo-600 text-white'
+                      : 'hover:bg-white/5'
+                  }`}
+                >
+                  <User className="h-4 w-4" />
+                  <span>Profile & Test History</span>
+                </button>
+              </div>
+            </div>
+
+            <div className="space-y-2 border-t pt-4 border-white/10">
+              <button
+                type="button"
+                onClick={() => {
+                  triggerCloudSync();
+                  setShowMobileDrawer(false);
+                }}
+                className="flex min-h-[42px] w-full items-center justify-center gap-2 rounded-xl border border-emerald-500/30 bg-emerald-500/10 text-xs font-bold text-emerald-400"
+              >
+                <RefreshCw className="h-3.5 w-3.5" />
+                Sync Cloud Progress Now
+              </button>
+            </div>
+          </div>
+          <div className="flex-1" onClick={() => setShowMobileDrawer(false)} />
+        </div>
+      )}
 
       {/* ==========================================================================
           MAIN WORKSPACE CONTAINER
@@ -845,6 +1395,79 @@ export function App() {
                 </div>
               </div>
             </section>
+
+            {/* Promotional Offers & Templates Strip (Phase 11) */}
+            {activePromotionalOffers.length > 0 && !studentState.isProUnlocked && (
+              <section className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                {activePromotionalOffers.map((promo) => {
+                  const templateTheme: Record<OfferTemplateId, string> = {
+                    royal_indigo:
+                      'from-indigo-950/90 via-indigo-900/60 to-slate-950 border-indigo-500/40',
+                    emerald_scholar:
+                      'from-emerald-950/90 via-teal-900/60 to-slate-950 border-emerald-500/40',
+                    amber_festive:
+                      'from-amber-950/90 via-orange-900/60 to-slate-950 border-amber-500/40',
+                    crimson_urgent:
+                      'from-rose-950/90 via-red-900/60 to-slate-950 border-rose-500/40',
+                  };
+                  return (
+                    <div
+                      key={promo.id}
+                      className={`relative overflow-hidden rounded-2xl border bg-gradient-to-br p-5 text-white ${
+                        templateTheme[promo.templateId] || templateTheme.royal_indigo
+                      }`}
+                    >
+                      <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-center">
+                        <div className="space-y-1.5">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="rounded-md bg-white/15 px-2.5 py-0.5 text-[10px] font-extrabold uppercase tracking-wider text-amber-300">
+                              {promo.badgeText || `${promo.discountPercent}% OFF`}
+                            </span>
+                            {promo.couponCode && (
+                              <span className="inline-flex items-center gap-1 rounded-md border border-white/20 bg-black/30 px-2 py-0.5 font-mono text-[11px] font-bold text-cyan-300">
+                                <Tag className="h-3 w-3" />
+                                {promo.couponCode}
+                              </span>
+                            )}
+                          </div>
+                          <h3 className="text-base font-extrabold">{promo.title}</h3>
+                          <p className="text-xs text-slate-200">{promo.subtitle}</p>
+                          <div className="flex items-baseline gap-2 pt-1">
+                            <span className="text-xl font-extrabold text-emerald-400">
+                              ₹{promo.finalPrice}
+                            </span>
+                            <span className="text-xs text-slate-400 line-through">
+                              ₹{promo.originalPrice}
+                            </span>
+                            <span className="text-[11px] text-slate-300">
+                              Valid till {promo.validUntil}
+                            </span>
+                          </div>
+                        </div>
+
+                        <div className="flex flex-col items-start gap-2 sm:items-end">
+                          {promo.bannerImageUrl && (
+                            <img
+                              src={promo.bannerImageUrl}
+                              alt={promo.title}
+                              className="h-16 w-28 rounded-xl border border-white/15 object-cover"
+                            />
+                          )}
+                          <button
+                            type="button"
+                            onClick={() => setShowProModal(true)}
+                            className="inline-flex min-h-[38px] items-center gap-1.5 rounded-xl bg-white px-4 py-2 text-xs font-extrabold text-slate-950 hover:bg-slate-100"
+                          >
+                            <Sparkles className="h-3.5 w-3.5 text-indigo-600" />
+                            Claim Offer
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </section>
+            )}
 
             {/* Section C: 6 Clean Learning Shortcuts */}
             <section className="space-y-3">
@@ -1217,43 +1840,82 @@ export function App() {
               </div>
             </div>
 
-            {examsSubView === 'series' ? (
-              <div className="space-y-5">
-                {/* Folder Filter Strip */}
-                <div className="flex items-center gap-2 overflow-x-auto no-scrollbar pb-1">
-                  <button
-                    type="button"
-                    onClick={() => setSelectedFolderId('ALL')}
-                    className={`min-h-[38px] shrink-0 rounded-xl px-3.5 text-xs font-semibold transition ${
-                      selectedFolderId === 'ALL'
-                        ? 'bg-indigo-600 text-white'
-                        : isDark
-                        ? 'bg-white/5 text-slate-300 hover:bg-white/10'
-                        : 'bg-white text-slate-700 border border-slate-200'
-                    }`}
-                  >
-                    All Folders
-                  </button>
-                  {examFolders
-                    .filter((f) => f.type === 'test')
-                    .map((folder) => (
-                      <button
-                        key={folder.id}
-                        type="button"
-                        onClick={() => setSelectedFolderId(folder.id)}
-                        className={`inline-flex min-h-[38px] shrink-0 items-center gap-1.5 rounded-xl px-3.5 text-xs font-semibold transition ${
-                          selectedFolderId === folder.id
-                            ? 'bg-indigo-600 text-white'
-                            : isDark
-                            ? 'bg-white/5 text-slate-300 hover:bg-white/10'
-                            : 'bg-white text-slate-700 border border-slate-200'
-                        }`}
-                      >
-                        <Folder className="h-3.5 w-3.5 text-indigo-400" />
-                        <span>{language === 'hi' ? folder.name_hi : folder.name_en}</span>
-                      </button>
-                    ))}
-                </div>
+             {examsSubView === 'series' ? (
+               <div className="space-y-5">
+                 {/* Dynamic Category & Subcategory Filter Strip (Phase 10) */}
+                 {examDynamicCategories.length > 0 && (
+                   <div className="flex items-center gap-2 overflow-x-auto no-scrollbar pb-1">
+                     <span className="inline-flex items-center gap-1 text-xs font-bold text-slate-400">
+                       <Layers className="h-3.5 w-3.5 text-indigo-400" />
+                       Category:
+                     </span>
+                     <button
+                       type="button"
+                       onClick={() => setSelectedDynamicCatId('ALL')}
+                       className={`min-h-[34px] shrink-0 rounded-xl px-3 text-xs font-semibold transition ${
+                         selectedDynamicCatId === 'ALL'
+                           ? 'bg-indigo-600 text-white'
+                           : isDark
+                           ? 'bg-white/5 text-slate-300 hover:bg-white/10'
+                           : 'bg-white text-slate-700 border border-slate-200'
+                       }`}
+                     >
+                       All Categories
+                     </button>
+                     {examDynamicCategories.map((cat) => (
+                       <button
+                         key={cat.id}
+                         type="button"
+                         onClick={() => setSelectedDynamicCatId(cat.id)}
+                         className={`min-h-[34px] shrink-0 rounded-xl px-3 text-xs font-semibold transition ${
+                           selectedDynamicCatId === cat.id
+                             ? 'bg-indigo-600 text-white'
+                             : isDark
+                             ? 'bg-white/5 text-slate-300 hover:bg-white/10'
+                             : 'bg-white text-slate-700 border border-slate-200'
+                         }`}
+                       >
+                         {cat.parentId ? `↳ ${cat.name}` : cat.name}
+                       </button>
+                     ))}
+                   </div>
+                 )}
+
+                 {/* Folder Filter Strip */}
+                 <div className="flex items-center gap-2 overflow-x-auto no-scrollbar pb-1">
+                   <button
+                     type="button"
+                     onClick={() => setSelectedFolderId('ALL')}
+                     className={`min-h-[38px] shrink-0 rounded-xl px-3.5 text-xs font-semibold transition ${
+                       selectedFolderId === 'ALL'
+                         ? 'bg-indigo-600 text-white'
+                         : isDark
+                         ? 'bg-white/5 text-slate-300 hover:bg-white/10'
+                         : 'bg-white text-slate-700 border border-slate-200'
+                     }`}
+                   >
+                     All Folders
+                   </button>
+                   {examFolders
+                     .filter((f) => f.type === 'test')
+                     .map((folder) => (
+                       <button
+                         key={folder.id}
+                         type="button"
+                         onClick={() => setSelectedFolderId(folder.id)}
+                         className={`inline-flex min-h-[38px] shrink-0 items-center gap-1.5 rounded-xl px-3.5 text-xs font-semibold transition ${
+                           selectedFolderId === folder.id
+                             ? 'bg-indigo-600 text-white'
+                             : isDark
+                             ? 'bg-white/5 text-slate-300 hover:bg-white/10'
+                             : 'bg-white text-slate-700 border border-slate-200'
+                         }`}
+                       >
+                         <Folder className="h-3.5 w-3.5 text-indigo-400" />
+                         <span>{language === 'hi' ? folder.name_hi : folder.name_en}</span>
+                       </button>
+                     ))}
+                 </div>
 
                 {/* Test Pack List */}
                 {filteredTestPacks.length === 0 ? (
@@ -2414,71 +3076,546 @@ export function App() {
                   )}
                 </div>
               )}
+              {/* Profile Sub-Navigation Pills: Overview / Refer & Earn / Support & Contact */}
+              <div className="mt-5 flex flex-wrap items-center gap-2 border-t pt-4 border-white/10">
+                <button
+                  type="button"
+                  onClick={() => setProfileSection('overview')}
+                  className={`inline-flex min-h-[38px] items-center gap-1.5 rounded-xl px-4 text-xs font-bold transition ${
+                    profileSection === 'overview'
+                      ? 'bg-indigo-600 text-white'
+                      : isDark
+                      ? 'bg-white/5 text-slate-300 hover:bg-white/10'
+                      : 'bg-slate-100 text-slate-700'
+                  }`}
+                >
+                  <Trophy className="h-3.5 w-3.5" />
+                  Test History & Analytics
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setProfileSection('referrals')}
+                  className={`inline-flex min-h-[38px] items-center gap-1.5 rounded-xl px-4 text-xs font-bold transition ${
+                    profileSection === 'referrals'
+                      ? 'bg-indigo-600 text-white'
+                      : isDark
+                      ? 'bg-white/5 text-slate-300 hover:bg-white/10'
+                      : 'bg-slate-100 text-slate-700'
+                  }`}
+                >
+                  <Gift className="h-3.5 w-3.5 text-amber-400" />
+                  Refer & Earn Rewards
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setProfileSection('support')}
+                  className={`inline-flex min-h-[38px] items-center gap-1.5 rounded-xl px-4 text-xs font-bold transition ${
+                    profileSection === 'support'
+                      ? 'bg-indigo-600 text-white'
+                      : isDark
+                      ? 'bg-white/5 text-slate-300 hover:bg-white/10'
+                      : 'bg-slate-100 text-slate-700'
+                  }`}
+                >
+                  <Headphones className="h-3.5 w-3.5 text-cyan-400" />
+                  Support, Contact & Feedback
+                </button>
+              </div>
             </section>
 
-            {/* Recent Test Attempt History */}
-            <section className="space-y-3">
-              <h2 className="text-base font-bold">
-                Recent Test History ({studentState.testHistory.length})
-              </h2>
-              {studentState.testHistory.length === 0 ? (
-                <div
-                  className={`rounded-2xl p-8 text-center ${
+            {/* SUB-SECTION 1: REFER & EARN HUB (Phase 9) */}
+            {profileSection === 'referrals' && (
+              <section
+                className={`rounded-2xl p-5 sm:p-6 space-y-5 ${
+                  isDark ? 'surface-card-dark' : 'surface-card-light'
+                }`}
+              >
+                <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-center">
+                  <div>
+                    <span className="text-xs font-bold uppercase tracking-wider text-amber-400">
+                      Zyvra Student Ambassador Program
+                    </span>
+                    <h2 className="mt-1 text-lg font-extrabold">
+                      Refer Friends & Earn{' '}
+                      {db.referralPolicy?.commissionType === 'percent'
+                        ? `${db.referralPolicy.commissionValue}% Commission`
+                        : `₹${db.referralPolicy?.commissionValue || 30} Per Qualifying Pro Unlock`}
+                    </h2>
+                    <p className="mt-1 text-xs text-slate-400">
+                      Share your unique referral code with friends. When they unlock Zyvra Pro, your commission is credited to your ledger.
+                    </p>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-2">
+                    <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-2">
+                      <span className="block text-[10px] uppercase tracking-wider text-amber-300">
+                        Your Referral Code
+                      </span>
+                      <span className="font-mono text-sm font-extrabold text-amber-400">
+                        {studentState.referralCode}
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const shareUrl = `${window.location.origin}${window.location.pathname}?ref=${studentState.referralCode}`;
+                        navigator.clipboard?.writeText(
+                          `Prepare for SSC, BPSC, Railway & UPSC on Zyvra! Use my referral code ${studentState.referralCode} or link: ${shareUrl}`
+                        );
+                        setCopiedReferralToast(true);
+                        setTimeout(() => setCopiedReferralToast(false), 2500);
+                      }}
+                      className="inline-flex min-h-[42px] items-center gap-1.5 rounded-xl bg-amber-500 px-4 text-xs font-extrabold text-slate-950 hover:bg-amber-400"
+                    >
+                      <Share2 className="h-3.5 w-3.5" />
+                      {copiedReferralToast ? 'Copied Link!' : 'Copy Share Link'}
+                    </button>
+                  </div>
+                </div>
+
+                {/* Referral Earnings Stats */}
+                {(() => {
+                  const myCommissions = (db.referralCommissions || []).filter(
+                    (c) =>
+                      c.referralCode === studentState.referralCode ||
+                      c.referrerDeviceId === studentState.deviceId
+                  );
+                  const totalEarned = myCommissions
+                    .filter((c) => ['approved', 'payable', 'paid'].includes(c.status))
+                    .reduce((acc, c) => acc + c.commissionAmount, 0);
+                  const pendingAmt = myCommissions
+                    .filter((c) => c.status === 'pending')
+                    .reduce((acc, c) => acc + c.commissionAmount, 0);
+                  const paidAmt = myCommissions
+                    .filter((c) => c.status === 'paid')
+                    .reduce((acc, c) => acc + c.commissionAmount, 0);
+
+                  return (
+                    <div className="space-y-4">
+                      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+                        <div className="rounded-xl border border-white/10 bg-white/[0.02] p-3.5">
+                          <p className="text-[11px] text-slate-400">Total Referrals</p>
+                          <p className="mt-1 text-xl font-extrabold tabular-nums">
+                            {myCommissions.length}
+                          </p>
+                        </div>
+                        <div className="rounded-xl border border-white/10 bg-white/[0.02] p-3.5">
+                          <p className="text-[11px] text-slate-400">Pending Verification</p>
+                          <p className="mt-1 text-xl font-extrabold tabular-nums text-amber-400">
+                            ₹{pendingAmt}
+                          </p>
+                        </div>
+                        <div className="rounded-xl border border-white/10 bg-white/[0.02] p-3.5">
+                          <p className="text-[11px] text-slate-400">Approved & Payable</p>
+                          <p className="mt-1 text-xl font-extrabold tabular-nums text-emerald-400">
+                            ₹{totalEarned - paidAmt}
+                          </p>
+                        </div>
+                        <div className="rounded-xl border border-white/10 bg-white/[0.02] p-3.5">
+                          <p className="text-[11px] text-slate-400">Paid Out</p>
+                          <p className="mt-1 text-xl font-extrabold tabular-nums text-indigo-400">
+                            ₹{paidAmt}
+                          </p>
+                        </div>
+                      </div>
+
+                      {/* Apply a Friend's Referral Code + Request Payout */}
+                      <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                        <div className="rounded-xl border border-white/10 p-4 space-y-2.5">
+                          <h3 className="text-xs font-bold uppercase tracking-wider text-indigo-400">
+                            Have a Friend&apos;s Referral Code?
+                          </h3>
+                          <div className="flex gap-2">
+                            <input
+                              type="text"
+                              value={friendReferralInput}
+                              onChange={(e) => setFriendReferralInput(e.target.value.toUpperCase())}
+                              placeholder="Enter code e.g. ZYVREF-AB12"
+                              disabled={Boolean(studentState.referredByCode)}
+                              className={`min-h-[40px] flex-1 rounded-xl border px-3 text-xs font-mono uppercase outline-none ${
+                                isDark
+                                  ? 'border-white/10 bg-white/5 text-white'
+                                  : 'border-slate-200 bg-slate-50 text-slate-900'
+                              }`}
+                            />
+                            <button
+                              type="button"
+                              onClick={handleApplyReferralCode}
+                              disabled={Boolean(studentState.referredByCode)}
+                              className="min-h-[40px] rounded-xl bg-indigo-600 px-4 text-xs font-bold text-white disabled:opacity-50"
+                            >
+                              {studentState.referredByCode ? 'Linked' : 'Apply Code'}
+                            </button>
+                          </div>
+                          {referralApplyMsg && (
+                            <p className="text-[11px] font-semibold text-emerald-400">
+                              {referralApplyMsg}
+                            </p>
+                          )}
+                        </div>
+
+                        <div className="rounded-xl border border-white/10 p-4 space-y-2.5">
+                          <h3 className="text-xs font-bold uppercase tracking-wider text-emerald-400">
+                            Request UPI Commission Payout (Min ₹
+                            {db.referralPolicy?.minPayoutThreshold || 100})
+                          </h3>
+                          <div className="flex gap-2">
+                            <input
+                              type="text"
+                              value={payoutUpiInput}
+                              onChange={(e) => setPayoutUpiInput(e.target.value)}
+                              placeholder="yourname@upi"
+                              className={`min-h-[40px] flex-1 rounded-xl border px-3 text-xs outline-none ${
+                                isDark
+                                  ? 'border-white/10 bg-white/5 text-white'
+                                  : 'border-slate-200 bg-slate-50 text-slate-900'
+                              }`}
+                            />
+                            <button
+                              type="button"
+                              onClick={handleRequestReferralPayout}
+                              className="min-h-[40px] rounded-xl bg-emerald-600 px-4 text-xs font-bold text-white hover:bg-emerald-500"
+                            >
+                              Request Payout
+                            </button>
+                          </div>
+                          {payoutMsg && (
+                            <p className="text-[11px] font-semibold text-amber-400">{payoutMsg}</p>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })()}
+              </section>
+            )}
+
+            {/* SUB-SECTION 2: SUPPORT, CONTACT US & FEEDBACK DESK (Phase 4 & 5) */}
+            {profileSection === 'support' && (
+              <div className="space-y-6">
+                {/* Official Contact Channels */}
+                <section
+                  className={`rounded-2xl p-5 sm:p-6 space-y-4 ${
                     isDark ? 'surface-card-dark' : 'surface-card-light'
                   }`}
                 >
-                  <p className="text-sm text-slate-400">No tests completed yet.</p>
-                </div>
-              ) : (
-                <div className="space-y-3">
-                  {studentState.testHistory.map((att) => (
-                    <div
-                      key={att.id}
-                      className={`flex flex-col justify-between gap-3 rounded-2xl p-4 sm:flex-row sm:items-center ${
-                        isDark ? 'surface-card-dark' : 'surface-card-light'
-                      }`}
+                  <div>
+                    <span className="text-xs font-bold uppercase tracking-wider text-cyan-400">
+                      Customer Care & Student Helpdesk
+                    </span>
+                    <h2 className="mt-1 text-lg font-extrabold">Contact Us & Raise a Support Ticket</h2>
+                    <p className="text-xs text-slate-400">
+                      Working Hours: {db.supportConfig?.workingHours || 'Mon–Sat, 9:00 AM – 7:00 PM IST'}
+                    </p>
+                  </div>
+
+                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                    <a
+                      href={`mailto:${db.supportConfig?.supportEmail || 'support@zyvra.in'}`}
+                      className="flex items-center gap-3 rounded-xl border border-white/10 bg-white/[0.02] p-3.5 hover:border-indigo-500/40"
                     >
+                      <MessageSquare className="h-5 w-5 text-indigo-400" />
                       <div>
-                        <p className="text-xs font-semibold text-indigo-400">
-                          {att.exam} · {att.date}
-                        </p>
-                        <h3 className="mt-0.5 text-sm font-bold">{att.testTitle}</h3>
-                        <p className="mt-1 text-xs text-slate-400 tabular-nums">
-                          Score: <strong>{att.netScore}</strong>/{att.maxScore} · Accuracy:{' '}
-                          <strong className="text-emerald-400">{att.accuracy}%</strong> · Correct:{' '}
-                          {att.correct} · Wrong: {att.wrong}
+                        <p className="text-[11px] text-slate-400">Email Support</p>
+                        <p className="text-xs font-bold">
+                          {db.supportConfig?.supportEmail || 'support@zyvra.in'}
                         </p>
                       </div>
-
-                      <button
-                        type="button"
-                        onClick={() => {
-                          const qs = db.questions.filter((q) =>
-                            att.questionIds.includes(q.id)
-                          );
-                          if (qs.length === 0) return;
-                          setActiveTestConfig({
-                            title: att.testTitle,
-                            exam: att.exam,
-                            questions: qs,
-                            mode: att.mode,
-                            timerType: 'overall',
-                            overallMinutes: 15,
-                            sprintSeconds: 45,
-                            marksPerCorrect: att.marksPerCorrect ?? 2.0,
-                            negativeMarking: att.negativeMarking ?? 0.5,
-                          });
-                        }}
-                        className="inline-flex min-h-[40px] shrink-0 items-center gap-1.5 rounded-xl border border-white/15 px-3.5 text-xs font-semibold hover:bg-white/5"
-                      >
-                        <RotateCcw className="h-3.5 w-3.5" />
-                        Re-Attempt
-                      </button>
+                    </a>
+                    <a
+                      href={`tel:${db.supportConfig?.helplineNumber || '+919800000000'}`}
+                      className="flex items-center gap-3 rounded-xl border border-white/10 bg-white/[0.02] p-3.5 hover:border-emerald-500/40"
+                    >
+                      <Phone className="h-5 w-5 text-emerald-400" />
+                      <div>
+                        <p className="text-[11px] text-slate-400">Student Helpline</p>
+                        <p className="text-xs font-bold">
+                          {db.supportConfig?.helplineNumber || '+91 98000 00000'}
+                        </p>
+                      </div>
+                    </a>
+                    <div className="flex items-center gap-3 rounded-xl border border-white/10 bg-white/[0.02] p-3.5">
+                      <Headphones className="h-5 w-5 text-cyan-400" />
+                      <div>
+                        <p className="text-[11px] text-slate-400">WhatsApp Desk</p>
+                        <p className="text-xs font-bold">
+                          {db.supportConfig?.whatsappSupport || '+91 98000 00000'}
+                        </p>
+                      </div>
                     </div>
-                  ))}
-                </div>
-              )}
-            </section>
+                  </div>
+
+                  {/* Create Support Ticket Form */}
+                  <div className="grid grid-cols-1 gap-5 pt-2 lg:grid-cols-2">
+                    <div className="space-y-3 rounded-xl border border-white/10 p-4">
+                      <h3 className="text-sm font-bold">Raise a Support Ticket</h3>
+                      <div className="grid grid-cols-2 gap-2">
+                        <select
+                          value={ticketCategory}
+                          onChange={(e) =>
+                            setTicketCategory(e.target.value as SupportTicket['category'])
+                          }
+                          className={`min-h-[40px] rounded-xl border px-3 text-xs outline-none ${
+                            isDark
+                              ? 'border-white/10 bg-[#111827] text-white'
+                              : 'border-slate-200 bg-slate-50 text-slate-900'
+                          }`}
+                        >
+                          <option value="technical">Technical Issue</option>
+                          <option value="payment_pro">Pro Key / Payment</option>
+                          <option value="question_error">Question / Answer Doubt</option>
+                          <option value="account_sync">Account / Cloud Sync</option>
+                          <option value="other">Other Query</option>
+                        </select>
+                        <select
+                          value={ticketPriority}
+                          onChange={(e) =>
+                            setTicketPriority(e.target.value as SupportTicket['priority'])
+                          }
+                          className={`min-h-[40px] rounded-xl border px-3 text-xs outline-none ${
+                            isDark
+                              ? 'border-white/10 bg-[#111827] text-white'
+                              : 'border-slate-200 bg-slate-50 text-slate-900'
+                          }`}
+                        >
+                          <option value="low">Low Priority</option>
+                          <option value="medium">Medium Priority</option>
+                          <option value="high">High Priority</option>
+                        </select>
+                      </div>
+                      <input
+                        type="text"
+                        value={ticketSubject}
+                        onChange={(e) => setTicketSubject(e.target.value)}
+                        placeholder="Brief subject (e.g., Doubt in BPSC PYQ Q14)"
+                        className={`min-h-[40px] w-full rounded-xl border px-3 text-xs outline-none ${
+                          isDark
+                            ? 'border-white/10 bg-white/5 text-white'
+                            : 'border-slate-200 bg-slate-50 text-slate-900'
+                        }`}
+                      />
+                      <textarea
+                        rows={3}
+                        value={ticketMessage}
+                        onChange={(e) => setTicketMessage(e.target.value)}
+                        placeholder="Describe your issue or question in detail..."
+                        className={`w-full rounded-xl border p-3 text-xs outline-none ${
+                          isDark
+                            ? 'border-white/10 bg-white/5 text-white'
+                            : 'border-slate-200 bg-slate-50 text-slate-900'
+                        }`}
+                      />
+                      <div className="flex items-center justify-between gap-2">
+                        <button
+                          type="button"
+                          onClick={handleCreateSupportTicket}
+                          className="inline-flex min-h-[40px] items-center gap-1.5 rounded-xl bg-indigo-600 px-4 text-xs font-bold text-white hover:bg-indigo-500"
+                        >
+                          <Send className="h-3.5 w-3.5" />
+                          Submit Ticket
+                        </button>
+                        {ticketSubmitToast && (
+                          <span className="text-xs font-bold text-emerald-400">
+                            {ticketSubmitToast}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Submit General App Feedback */}
+                    <div className="space-y-3 rounded-xl border border-white/10 p-4">
+                      <h3 className="text-sm font-bold">Share Student Feedback</h3>
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs text-slate-400">Rating:</span>
+                        {[1, 2, 3, 4, 5].map((star) => (
+                          <button
+                            key={star}
+                            type="button"
+                            onClick={() => setGeneralFeedbackRating(star)}
+                            className={`rounded-lg p-1.5 ${
+                              generalFeedbackRating >= star ? 'text-amber-400' : 'text-slate-600'
+                            }`}
+                          >
+                            <Star className="h-4 w-4 fill-current" />
+                          </button>
+                        ))}
+                      </div>
+                      <select
+                        value={generalFeedbackCategory}
+                        onChange={(e) =>
+                          setGeneralFeedbackCategory(
+                            e.target.value as StudentFeedbackItem['category']
+                          )
+                        }
+                        className={`min-h-[40px] w-full rounded-xl border px-3 text-xs outline-none ${
+                          isDark
+                            ? 'border-white/10 bg-[#111827] text-white'
+                            : 'border-slate-200 bg-slate-50 text-slate-900'
+                        }`}
+                      >
+                        <option value="overall_experience">Overall App Experience</option>
+                        <option value="question_quality">Question & Explanation Quality</option>
+                        <option value="feature_request">New Exam / Feature Request</option>
+                        <option value="ui_bug">UI / Mobile Responsiveness</option>
+                      </select>
+                      <textarea
+                        rows={3}
+                        value={generalFeedbackMsg}
+                        onChange={(e) => setGeneralFeedbackMsg(e.target.value)}
+                        placeholder="Tell us what you love or what we should improve..."
+                        className={`w-full rounded-xl border p-3 text-xs outline-none ${
+                          isDark
+                            ? 'border-white/10 bg-white/5 text-white'
+                            : 'border-slate-200 bg-slate-50 text-slate-900'
+                        }`}
+                      />
+                      <div className="flex items-center justify-between gap-2">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (!generalFeedbackMsg.trim()) return;
+                            handleSubmitTestFeedback({
+                              exam: selectedExam,
+                              rating: generalFeedbackRating,
+                              category: generalFeedbackCategory,
+                              message: generalFeedbackMsg.trim(),
+                            });
+                            setGeneralFeedbackMsg('');
+                            setGeneralFeedbackToast('Thank you! Feedback recorded.');
+                            setTimeout(() => setGeneralFeedbackToast(''), 3500);
+                          }}
+                          className="inline-flex min-h-[40px] items-center gap-1.5 rounded-xl bg-emerald-600 px-4 text-xs font-bold text-white hover:bg-emerald-500"
+                        >
+                          <CheckCircle2 className="h-3.5 w-3.5" />
+                          Send Feedback
+                        </button>
+                        {generalFeedbackToast && (
+                          <span className="text-xs font-bold text-emerald-400">
+                            {generalFeedbackToast}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Student's Raised Support Tickets & Admin Replies */}
+                  <div className="space-y-2.5 pt-2">
+                    <h3 className="text-sm font-bold">Your Support Tickets</h3>
+                    {(db.supportTickets || []).filter(
+                      (t) =>
+                        t.deviceId === studentState.deviceId ||
+                        t.mobile === studentState.mobileNumber
+                    ).length === 0 ? (
+                      <p className="text-xs text-slate-400">No support tickets raised yet.</p>
+                    ) : (
+                      (db.supportTickets || [])
+                        .filter(
+                          (t) =>
+                            t.deviceId === studentState.deviceId ||
+                            t.mobile === studentState.mobileNumber
+                        )
+                        .map((tkt) => (
+                          <div
+                            key={tkt.id}
+                            className="rounded-xl border border-white/10 bg-white/[0.02] p-3.5 space-y-2"
+                          >
+                            <div className="flex flex-wrap items-center justify-between gap-2">
+                              <span className="font-mono text-xs font-bold text-indigo-400">
+                                {tkt.ticketNumber} · {tkt.subject}
+                              </span>
+                              <span className="rounded-lg bg-indigo-500/20 px-2.5 py-0.5 text-[10px] font-bold uppercase text-indigo-300">
+                                {tkt.status}
+                              </span>
+                            </div>
+                            <p className="text-xs text-slate-300">{tkt.message}</p>
+                            {tkt.replies && tkt.replies.length > 0 && (
+                              <div className="space-y-1.5 border-t border-white/10 pt-2">
+                                {tkt.replies.map((rep) => (
+                                  <div
+                                    key={rep.id}
+                                    className="rounded-lg bg-emerald-500/10 p-2 text-xs text-emerald-200"
+                                  >
+                                    <strong>{rep.senderName}:</strong> {rep.message}{' '}
+                                    <span className="text-[10px] text-slate-400">
+                                      ({rep.createdAt})
+                                    </span>
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        ))
+                    )}
+                  </div>
+                </section>
+              </div>
+            )}
+
+            {/* SUB-SECTION 3: RECENT TEST ATTEMPT HISTORY */}
+            {profileSection === 'overview' && (
+              <section className="space-y-3">
+                <h2 className="text-base font-bold">
+                  Recent Test History ({studentState.testHistory.length})
+                </h2>
+                {studentState.testHistory.length === 0 ? (
+                  <div
+                    className={`rounded-2xl p-8 text-center ${
+                      isDark ? 'surface-card-dark' : 'surface-card-light'
+                    }`}
+                  >
+                    <p className="text-sm text-slate-400">No tests completed yet.</p>
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    {studentState.testHistory.map((att) => (
+                      <div
+                        key={att.id}
+                        className={`flex flex-col justify-between gap-3 rounded-2xl p-4 sm:flex-row sm:items-center ${
+                          isDark ? 'surface-card-dark' : 'surface-card-light'
+                        }`}
+                      >
+                        <div>
+                          <p className="text-xs font-semibold text-indigo-400">
+                            {att.exam} · {att.date}
+                          </p>
+                          <h3 className="mt-0.5 text-sm font-bold">{att.testTitle}</h3>
+                          <p className="mt-1 text-xs text-slate-400 tabular-nums">
+                            Score: <strong>{att.netScore}</strong>/{att.maxScore} · Accuracy:{' '}
+                            <strong className="text-emerald-400">{att.accuracy}%</strong> · Correct:{' '}
+                            {att.correct} · Wrong: {att.wrong}
+                          </p>
+                        </div>
+
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const qs = db.questions.filter((q) =>
+                              att.questionIds.includes(q.id)
+                            );
+                            if (qs.length === 0) return;
+                            setActiveTestConfig({
+                              title: att.testTitle,
+                              exam: att.exam,
+                              questions: qs,
+                              mode: att.mode,
+                              timerType: 'overall',
+                              overallMinutes: 15,
+                              sprintSeconds: 45,
+                              marksPerCorrect: att.marksPerCorrect ?? 2.0,
+                              negativeMarking: att.negativeMarking ?? 0.5,
+                            });
+                          }}
+                          className="inline-flex min-h-[40px] shrink-0 items-center gap-1.5 rounded-xl border border-white/15 px-3.5 text-xs font-semibold hover:bg-white/5"
+                        >
+                          <RotateCcw className="h-3.5 w-3.5" />
+                          Re-Attempt
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </section>
+            )}
 
             {/* Student Footer (Discreet 5-tap on Zyvra Logo; no public Admin link) */}
             <footer className="border-t pt-6 text-center border-white/10">
@@ -2517,7 +3654,7 @@ export function App() {
               <button
                 key={item.id}
                 type="button"
-                onClick={() => setActiveTab(item.id)}
+                onClick={() => navigateToTab(item.id)}
                 className={`flex min-h-[48px] flex-col items-center justify-center gap-1 rounded-xl py-1 text-[11px] font-bold transition ${
                   isActive
                     ? 'text-indigo-400'
@@ -2686,6 +3823,21 @@ export function App() {
           studentState={studentState}
           onToggleBookmarkQuestion={handleToggleBookmarkQuestion}
           onCompleteTest={handleCompleteTest}
+          onSubmitFeedback={handleSubmitTestFeedback}
+          onGoHome={() => {
+            setActiveTestConfig(null);
+            navigateToTab('home');
+          }}
+          onStartNextTest={() => {
+            const nextPack = filteredTestPacks.find(
+              (p) => p.id !== activeTestConfig.packId && (!p.isPro || studentState.isProUnlocked)
+            );
+            if (nextPack) {
+              launchTestPack(nextPack);
+            } else {
+              launchQuickExamPractice('pyq');
+            }
+          }}
           onClose={() => setActiveTestConfig(null)}
         />
       )}

@@ -1,20 +1,31 @@
 import { INITIAL_MASTER_DATABASE } from '../data/seedDatabase';
 import {
   CustomFolder,
+  DynamicCategoryNode,
   ExamCategory,
   ExamFamily,
   Flashcard,
   GitHubSyncConfig,
   MasterDatabase,
+  PromotionalOfferItem,
   PYQTrendTopic,
   Question,
+  ReferralPolicyConfig,
+  StudentFeedbackItem,
   StudentLocalState,
   StudentSaleLog,
   StudyNote,
+  SupportContactConfig,
+  SupportTicket,
   SyncAuditLog,
   TestSeriesPack,
 } from '../types/database';
-import { generateDeviceId, verifyProKeyForDevice } from './cryptoLock';
+import {
+  generateDeviceId,
+  generateReferralCode,
+  getActiveAdminSession,
+  verifyProKeyForDevice,
+} from './cryptoLock';
 
 const DB_STORAGE_KEY_V3 = 'universal_exam_prep_master_db_v3_0';
 const LEGACY_DB_STORAGE_KEY_V26 = 'ssc_prep_master_database_v2_6';
@@ -22,6 +33,8 @@ const BACKUP_DB_STORAGE_KEY_V26 = 'ssc_prep_backup_v2_6_pre_v3_migration';
 const STUDENT_STATE_KEY = 'ssc_prep_student_state_v2_6';
 const GITHUB_SYNC_KEY = 'ssc_prep_github_sync_config_v1';
 const THEME_STORAGE_KEY = 'ssc_prep_theme_mode';
+const OFFLINE_SYNC_QUEUE_KEY = 'zyvra_offline_sync_queue_v1';
+const TRANSLATION_CACHE_KEY = 'zyvra_question_translation_cache_v1';
 
 const IDB_NAME = 'SSCExamPrepProOfflineDB';
 const IDB_STORE = 'app_store';
@@ -493,10 +506,37 @@ export function migrateDatabaseToV3(rawLegacyOrV3: Partial<MasterDatabase>): Mas
 
   const testSeriesMap = new Map<string, TestSeriesPack>();
   if (!isAlreadyV3 || !Array.isArray(rawLegacyOrV3.testSeries)) {
-    (seed.testSeries || []).forEach((ts) => testSeriesMap.set(ts.id, ts));
+    (seed.testSeries || []).forEach((ts) =>
+      testSeriesMap.set(ts.id, {
+        ...ts,
+        customizationRules: ts.customizationRules || {
+          customizationAllowed: true,
+          allowModeSwitch: true,
+          allowTimerChange: true,
+          allowQuestionCountChange: false,
+          allowCategoryFilter: false,
+          randomizeQuestions: false,
+        },
+      })
+    );
   }
   (rawLegacyOrV3.testSeries || []).forEach((ts) => {
-    if (ts && ts.id) testSeriesMap.set(ts.id, { ...(testSeriesMap.get(ts.id) || {}), ...ts });
+    if (ts && ts.id) {
+      const existing = testSeriesMap.get(ts.id);
+      testSeriesMap.set(ts.id, {
+        ...(existing || {}),
+        ...ts,
+        customizationRules: ts.customizationRules ||
+          existing?.customizationRules || {
+            customizationAllowed: true,
+            allowModeSwitch: true,
+            allowTimerChange: true,
+            allowQuestionCountChange: false,
+            allowCategoryFilter: false,
+            randomizeQuestions: false,
+          },
+      });
+    }
   });
 
   const rawSales = Array.isArray(rawLegacyOrV3.salesLog)
@@ -508,26 +548,147 @@ export function migrateDatabaseToV3(rawLegacyOrV3: Partial<MasterDatabase>): Mas
 
   const normalizedTrends = Array.from(trendMap.values());
 
+  const defaultDynamicCategories: DynamicCategoryNode[] = [
+    {
+      id: 'cat-quant',
+      name_en: 'Quantitative Aptitude & Maths',
+      name_hi: 'मात्रात्मक अभियोग्यता एवं गणित',
+      parentId: null,
+      examId: 'ALL',
+      subject: 'Quantitative Aptitude',
+      order: 1,
+      status: 'active',
+      createdAt: '2026-10-01',
+    },
+    {
+      id: 'subcat-quant-arith',
+      name_en: 'Arithmetic (Percentage, Profit & Loss, SI/CI)',
+      name_hi: 'अंकगणित (प्रतिशत, लाभ-हानि, ब्याज)',
+      parentId: 'cat-quant',
+      examId: 'ALL',
+      subject: 'Quantitative Aptitude',
+      order: 1,
+      status: 'active',
+      createdAt: '2026-10-01',
+    },
+    {
+      id: 'subcat-quant-adv',
+      name_en: 'Advance Maths (Algebra, Geometry, Trigonometry)',
+      name_hi: 'एडवांस मैथ्स (बीजगणित, ज्यामिति, त्रिकोणमिति)',
+      parentId: 'cat-quant',
+      examId: 'SSC CGL',
+      subject: 'Quantitative Aptitude',
+      order: 2,
+      status: 'active',
+      createdAt: '2026-10-01',
+    },
+    {
+      id: 'cat-gs',
+      name_en: 'General Studies & Static GK',
+      name_hi: 'सामान्य अध्ययन एवं स्टेटिक जीके',
+      parentId: null,
+      examId: 'ALL',
+      subject: 'General Awareness & Static GK',
+      order: 2,
+      status: 'active',
+      createdAt: '2026-10-01',
+    },
+    {
+      id: 'subcat-gs-polity',
+      name_en: 'Indian Polity & Constitution',
+      name_hi: 'भारतीय राजव्यवस्था एवं संविधान',
+      parentId: 'cat-gs',
+      examId: 'ALL',
+      subject: 'General Awareness & Static GK',
+      order: 1,
+      status: 'active',
+      createdAt: '2026-10-01',
+    },
+    {
+      id: 'subcat-gs-bihar',
+      name_en: 'Bihar Special GK & History',
+      name_hi: 'बिहार स्पेशल सामान्य ज्ञान एवं इतिहास',
+      parentId: 'cat-gs',
+      examId: 'BPSC TRE',
+      subject: 'Bihar Special & General Studies',
+      order: 2,
+      status: 'active',
+      createdAt: '2026-10-01',
+    },
+  ];
+
+  const defaultPromotionalOffers: PromotionalOfferItem[] = [
+    {
+      id: 'promo-universal-2026',
+      title_en: 'Zyvra Universal All-Exams Pro Pass — Festive Scholarship Offer',
+      title_hi: 'ज़िवरा यूनिवर्सल ऑल-एग्जाम प्रो पास — विशेष छात्रवृत्ति ऑफर',
+      description_en:
+        'Unlock all SSC, BPSC TRE, BPSC PCS, Bihar Daroga, Railway & UPSC PYQ Mocks, Custom Test Builder, and Bilingual Study PDFs.',
+      description_hi:
+        'सभी SSC, BPSC TRE, BPSC PCS, बिहार दरोगा, रेलवे और UPSC टेस्ट सीरीज़ व स्टडी नोट्स अनलॉक करें।',
+      templateId: 'royal_indigo',
+      discountType: 'flat',
+      discountValue: 30,
+      couponCode: 'SSC30',
+      validFrom: '2026-01-01',
+      validUntil: '2027-12-31',
+      targetDestination: 'pro_modal',
+      isActive: true,
+      createdAt: '2026-10-01',
+    },
+  ];
+
+  const defaultSupportConfig: SupportContactConfig = {
+    isConfigured: true,
+    supportEmail: 'support@zyvra.in',
+    helplineNumber: '+91-9876543210',
+    whatsappSupport: '919876543210',
+    workingHours_en: 'Mon – Sat, 9:00 AM to 7:00 PM IST',
+    workingHours_hi: 'सोमवार – शनिवार, सुबह 9:00 से शाम 7:00 बजे तक',
+    supportNotice_en:
+      'Raise a support ticket below for Pro activation, test question queries, or account sync help. Our academic team replies directly inside your ticket thread.',
+    supportNotice_hi:
+      'प्रो एक्टिवेशन, प्रश्न संदेह या अकाउंट सिंक सहायता के लिए नीचे सपोर्ट टिकट दर्ज करें।',
+  };
+
+  const defaultReferralPolicy: ReferralPolicyConfig = {
+    enabled: true,
+    commissionType: 'fixed',
+    commissionValue: 30,
+    qualifyingEvent: 'pro_pass_verified',
+    minPayoutThreshold: 90,
+    offerStartDate: '2026-01-01',
+    offerEndDate: '2027-12-31',
+    terms_en:
+      'Earn verified commission when an aspirant joins using your referral code and completes a verified Zyvra Pro Pass activation.',
+    terms_hi:
+      'जब कोई छात्र आपके रेफरल कोड से जुड़कर सत्यापित Zyvra Pro Pass सक्रिय करता है, तो आपको कमीशन मिलता है।',
+  };
+
   return {
     version: '3.0.0-UNIVERSAL',
     schemaVersion: 3,
-    lastUpdated: new Date().toISOString(),
+    lastUpdated: rawLegacyOrV3.lastUpdated || new Date().toISOString(),
     examFamilies: Array.from(familyMap.values()).sort(
       (a, b) => (a.displayOrder ?? a.order ?? 1) - (b.displayOrder ?? b.order ?? 1)
     ),
     exams: Array.from(examMap.values()).sort(
       (a, b) => (a.sortOrder ?? a.order ?? 99) - (b.sortOrder ?? b.order ?? 99)
     ),
-    subjects: isAlreadyV3 && rawLegacyOrV3.subjects
-      ? { ...rawLegacyOrV3.subjects }
-      : {
-          ...(seed.subjects || {}),
-          ...(rawLegacyOrV3.subjects || {}),
-        },
+    subjects:
+      isAlreadyV3 && rawLegacyOrV3.subjects
+        ? { ...rawLegacyOrV3.subjects }
+        : {
+            ...(seed.subjects || {}),
+            ...(rawLegacyOrV3.subjects || {}),
+          },
     subtopicsMap: {
       ...(seed.subtopicsMap || {}),
       ...(rawLegacyOrV3.subtopicsMap || {}),
     },
+    dynamicCategories: Array.isArray(rawLegacyOrV3.dynamicCategories)
+      ? rawLegacyOrV3.dynamicCategories
+      : defaultDynamicCategories,
     folders: Array.from(folderMap.values()),
     pyqTrends: normalizedTrends,
     trends: normalizedTrends,
@@ -539,11 +700,28 @@ export function migrateDatabaseToV3(rawLegacyOrV3: Partial<MasterDatabase>): Mas
       ...seed.offers,
       ...(rawLegacyOrV3.offers || {}),
     },
-    coupons: Array.isArray(rawLegacyOrV3.coupons)
-      ? rawLegacyOrV3.coupons
-      : seed.coupons,
+    promotionalOffers: Array.isArray(rawLegacyOrV3.promotionalOffers)
+      ? rawLegacyOrV3.promotionalOffers
+      : defaultPromotionalOffers,
+    coupons: Array.isArray(rawLegacyOrV3.coupons) ? rawLegacyOrV3.coupons : seed.coupons,
     salesLog: normalizedSales,
     salesLogs: normalizedSales,
+    feedbackList: Array.isArray(rawLegacyOrV3.feedbackList) ? rawLegacyOrV3.feedbackList : [],
+    supportTickets: Array.isArray(rawLegacyOrV3.supportTickets)
+      ? rawLegacyOrV3.supportTickets
+      : [],
+    supportConfig: rawLegacyOrV3.supportConfig
+      ? { ...defaultSupportConfig, ...rawLegacyOrV3.supportConfig }
+      : defaultSupportConfig,
+    referralPolicy: rawLegacyOrV3.referralPolicy
+      ? { ...defaultReferralPolicy, ...rawLegacyOrV3.referralPolicy }
+      : defaultReferralPolicy,
+    referralAttributions: Array.isArray(rawLegacyOrV3.referralAttributions)
+      ? rawLegacyOrV3.referralAttributions
+      : [],
+    referralCommissions: Array.isArray(rawLegacyOrV3.referralCommissions)
+      ? rawLegacyOrV3.referralCommissions
+      : [],
     importHistory: Array.isArray(rawLegacyOrV3.importHistory)
       ? rawLegacyOrV3.importHistory
       : seed.importHistory || [],
@@ -720,6 +898,7 @@ export function loadStudentState(): StudentLocalState {
       ...initialState,
       ...parsed,
       deviceId: currentDeviceId,
+      referralCode: parsed.referralCode || generateReferralCode(currentDeviceId),
       isProUnlocked: verifiedPro,
       recentExamNames:
         Array.isArray(parsed.recentExamNames) && parsed.recentExamNames.length > 0
@@ -727,7 +906,10 @@ export function loadStudentState(): StudentLocalState {
           : initialState.recentExamNames,
     };
   } catch {
-    return initialState;
+    return {
+      ...initialState,
+      referralCode: generateReferralCode(defaultDeviceId),
+    };
   }
 }
 
@@ -979,3 +1161,522 @@ export async function pullDatabaseFromGitHub(
     };
   }
 }
+
+// ============================================================================
+// REAL CLOUD SYNC, TRANSLATION, FEEDBACK, SUPPORT & REFERRAL API CLIENT
+// Supports same-origin `/api/*` backend OR configured `VITE_API_BASE_URL`
+// with automatic offline queue and retry.
+// ============================================================================
+
+export function resolveApiBaseUrl(): string {
+  const envUrl =
+    (typeof import.meta !== 'undefined' &&
+      (import.meta as unknown as { env?: Record<string, string> }).env?.VITE_API_BASE_URL) ||
+    '';
+  return envUrl.trim().replace(/\/$/, '');
+}
+
+export function getAdminAuthHeaders(): Record<string, string> {
+  const sess = getActiveAdminSession();
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+  };
+  if (sess?.token) {
+    headers['Authorization'] = `Bearer ${sess.token}`;
+  }
+  return headers;
+}
+
+export interface OfflineQueueItem {
+  id: string;
+  endpoint: string;
+  method: 'POST' | 'PUT' | 'PATCH';
+  payload: unknown;
+  createdAt: number;
+}
+
+export function getOfflineSyncQueue(): OfflineQueueItem[] {
+  if (typeof window === 'undefined') return [];
+  try {
+    const raw = localStorage.getItem(OFFLINE_SYNC_QUEUE_KEY);
+    return raw ? (JSON.parse(raw) as OfflineQueueItem[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+export function enqueueOfflineSyncItem(
+  itemOrType:
+    | Omit<OfflineQueueItem, 'id' | 'createdAt'>
+    | 'student_state'
+    | 'master_db'
+    | 'feedback'
+    | 'ticket',
+  optionalPayload?: unknown
+): void {
+  if (typeof window === 'undefined') return;
+  try {
+    let item: Omit<OfflineQueueItem, 'id' | 'createdAt'>;
+    if (typeof itemOrType === 'string') {
+      const endpointMap: Record<string, { endpoint: string; method: 'POST' | 'PUT' }> = {
+        student_state: { endpoint: '/api/sync/student', method: 'POST' },
+        master_db: { endpoint: '/api/sync/master', method: 'PUT' },
+        feedback: { endpoint: '/api/feedback', method: 'POST' },
+        ticket: { endpoint: '/api/support/tickets', method: 'POST' },
+      };
+      const cfg = endpointMap[itemOrType] || { endpoint: '/api/sync/student', method: 'POST' };
+      item = {
+        endpoint: cfg.endpoint,
+        method: cfg.method,
+        payload:
+          itemOrType === 'student_state'
+            ? {
+                deviceId: (optionalPayload as StudentLocalState)?.deviceId,
+                mobileNumber: (optionalPayload as StudentLocalState)?.mobileNumber,
+                studentState: optionalPayload,
+              }
+            : optionalPayload,
+      };
+    } else {
+      item = itemOrType;
+    }
+
+    const queue = getOfflineSyncQueue();
+    const filtered = queue.filter(
+      (q) => !(q.endpoint === item.endpoint && q.method === item.method)
+    );
+    filtered.push({
+      ...item,
+      id: `q-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      createdAt: Date.now(),
+    });
+    localStorage.setItem(OFFLINE_SYNC_QUEUE_KEY, JSON.stringify(filtered.slice(-30)));
+  } catch {
+    // Ignore storage errors
+  }
+}
+
+export async function flushOfflineSyncQueue(): Promise<{
+  flushed: number;
+  remaining: number;
+}> {
+  const queue = getOfflineSyncQueue();
+  if (queue.length === 0) return { flushed: 0, remaining: 0 };
+
+  const base = resolveApiBaseUrl();
+  const remainingItems: OfflineQueueItem[] = [];
+  let flushed = 0;
+
+  for (const item of queue) {
+    try {
+      const res = await fetch(`${base}${item.endpoint}`, {
+        method: item.method,
+        headers: getAdminAuthHeaders(),
+        credentials: 'include',
+        body: JSON.stringify(item.payload),
+      });
+      if (res.ok || res.status === 400 || res.status === 409) {
+        flushed += 1;
+      } else {
+        remainingItems.push(item);
+      }
+    } catch {
+      remainingItems.push(item);
+    }
+  }
+
+  if (typeof window !== 'undefined') {
+    localStorage.setItem(OFFLINE_SYNC_QUEUE_KEY, JSON.stringify(remainingItems));
+  }
+  return { flushed, remaining: remainingItems.length };
+}
+
+/**
+ * Synchronizes both MasterDatabase and StudentLocalState with the backend server (`/api/sync/*`).
+ * Merges student testHistory, bookmarks, and mistakes non-destructively across devices.
+ */
+export async function syncWithCloudBackend(
+  providedStudent?: StudentLocalState
+): Promise<{
+  ok: boolean;
+  status: 'synced' | 'pending' | 'failed';
+  db: MasterDatabase;
+  student: StudentLocalState;
+  masterDb?: MasterDatabase;
+  studentState?: StudentLocalState;
+  syncedAt?: string;
+  message: string;
+}> {
+  const currentStudent = providedStudent || loadStudentState();
+  const localDb = loadMasterDatabase();
+  const base = resolveApiBaseUrl();
+  try {
+    await flushOfflineSyncQueue();
+
+    // 1. Push latest student state (idempotent merge on backend)
+    const pushRes = await fetch(`${base}/api/sync/student`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({
+        deviceId: currentStudent.deviceId,
+        mobileNumber: currentStudent.mobileNumber,
+        studentState: currentStudent,
+      }),
+    });
+
+    // 2. Pull authoritative bootstrap state
+    const pullRes = await fetch(
+      `${base}/api/sync/bootstrap?deviceId=${encodeURIComponent(
+        currentStudent.deviceId
+      )}&mobile=${encodeURIComponent(currentStudent.mobileNumber || '')}`,
+      {
+        method: 'GET',
+        headers: { Accept: 'application/json' },
+        credentials: 'include',
+      }
+    );
+
+    if (!pullRes.ok) {
+      throw new Error(`HTTP ${pullRes.status}`);
+    }
+
+    const data = await pullRes.json();
+    const syncedAt = data.syncedAt || new Date().toISOString();
+    const remoteMaster = data.masterDb
+      ? migrateDatabaseToV3(data.masterDb)
+      : localDb;
+
+    let mergedStudent: StudentLocalState = {
+      ...currentStudent,
+      syncStatus: 'synced',
+      lastSyncedAt: syncedAt,
+      lastCloudSyncedAt: syncedAt,
+    };
+
+    if (data.studentState) {
+      const rem = data.studentState as StudentLocalState;
+      const attemptMap = new Map<string, StudentLocalState['testHistory'][0]>();
+      (rem.testHistory || []).forEach((a) => attemptMap.set(a.id, a));
+      (currentStudent.testHistory || []).forEach((a) => attemptMap.set(a.id, a));
+
+      mergedStudent = {
+        ...currentStudent,
+        ...rem,
+        deviceId: currentStudent.deviceId,
+        referralCode:
+          rem.referralCode ||
+          currentStudent.referralCode ||
+          generateReferralCode(currentStudent.deviceId),
+        isProUnlocked: Boolean(currentStudent.isProUnlocked || rem.isProUnlocked),
+        bookmarkedQuestionIds: Array.from(
+          new Set([
+            ...(rem.bookmarkedQuestionIds || []),
+            ...(currentStudent.bookmarkedQuestionIds || []),
+          ])
+        ),
+        bookmarkedNoteIds: Array.from(
+          new Set([
+            ...(rem.bookmarkedNoteIds || []),
+            ...(currentStudent.bookmarkedNoteIds || []),
+          ])
+        ),
+        masteredFlashcardIds: Array.from(
+          new Set([
+            ...(rem.masteredFlashcardIds || []),
+            ...(currentStudent.masteredFlashcardIds || []),
+          ])
+        ),
+        mistakes: {
+          ...(rem.mistakes || {}),
+          ...(currentStudent.mistakes || {}),
+        },
+        testHistory: Array.from(attemptMap.values()),
+        syncStatus: 'synced',
+        lastSyncedAt: syncedAt,
+        lastCloudSyncedAt: syncedAt,
+      };
+      saveStudentState(mergedStudent);
+    }
+
+    if (remoteMaster) {
+      saveMasterDatabase(remoteMaster);
+    }
+
+    return {
+      ok: pushRes.ok && pullRes.ok,
+      status: 'synced',
+      db: remoteMaster,
+      student: mergedStudent,
+      masterDb: remoteMaster,
+      studentState: mergedStudent,
+      syncedAt,
+      message: 'Cloud Sync completed.',
+    };
+  } catch {
+    enqueueOfflineSyncItem({
+      endpoint: '/api/sync/student',
+      method: 'POST',
+      payload: {
+        deviceId: currentStudent.deviceId,
+        mobileNumber: currentStudent.mobileNumber,
+        studentState: currentStudent,
+      },
+    });
+    const fallbackStatus = getOfflineSyncQueue().length > 0 ? 'pending' : 'failed';
+    const fallbackStudent: StudentLocalState = {
+      ...currentStudent,
+      syncStatus: fallbackStatus,
+    };
+    return {
+      ok: false,
+      status: fallbackStatus,
+      db: localDb,
+      student: fallbackStudent,
+      masterDb: localDb,
+      studentState: fallbackStudent,
+      message: 'Offline / server unreachable — changes queued for automatic sync.',
+    };
+  }
+}
+
+export async function pushMasterDatabaseToCloudBackend(
+  updatedDb: MasterDatabase
+): Promise<{ ok: boolean; status: 'synced' | 'pending' | 'failed'; message: string }> {
+  const base = resolveApiBaseUrl();
+  try {
+    const res = await fetch(`${base}/api/sync/master`, {
+      method: 'PUT',
+      headers: getAdminAuthHeaders(),
+      credentials: 'include',
+      body: JSON.stringify({ masterDb: updatedDb }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      return {
+        ok: false,
+        status: 'failed',
+        message: err.error || `Server sync failed (${res.status})`,
+      };
+    }
+    return {
+      ok: true,
+      status: 'synced',
+      message: 'Master database synced to Cloud Server.',
+    };
+  } catch {
+    enqueueOfflineSyncItem({
+      endpoint: '/api/sync/master',
+      method: 'PUT',
+      payload: { masterDb: updatedDb },
+    });
+    return {
+      ok: false,
+      status: 'pending',
+      message: 'Saved locally & queued for Cloud Sync.',
+    };
+  }
+}
+
+/**
+ * Translates a question statement, options, and explanation into the target language
+ * using the server-side translation endpoint (`/api/translate`) with local cache
+ * and verified bilingual fallback. Never alters question ID, answer selection, or scoring.
+ */
+export interface TranslatedQuestionPayload {
+  targetLang: string;
+  targetLangLabel: string;
+  questionText: string;
+  options: string[];
+  explanation?: string;
+  basicExplanation: string;
+  trickExplanation: string;
+  provider: 'verified_bilingual' | 'cloud_ai' | 'offline_dictionary';
+}
+
+export async function translateQuestionContent(
+  qOrInput:
+    | Question
+    | {
+        question: Question;
+        targetLanguage: 'hi' | 'en' | 'bn' | 'mr' | 'ta' | 'te' | 'ur';
+      },
+  maybeTargetLang?: 'hi' | 'en' | 'bn' | 'mr' | 'ta' | 'te' | 'ur'
+): Promise<{
+  ok: boolean;
+  questionText: string;
+  options: string[];
+  explanation: string;
+  provider: string;
+  data?: TranslatedQuestionPayload;
+  error?: string;
+}> {
+  const q: Question = 'question' in qOrInput ? qOrInput.question : qOrInput;
+  const targetLang: 'hi' | 'en' | 'bn' | 'mr' | 'ta' | 'te' | 'ur' =
+    ('targetLanguage' in qOrInput ? qOrInput.targetLanguage : maybeTargetLang) || 'hi';
+
+  const langLabels: Record<string, string> = {
+    hi: 'हिन्दी (Hindi)',
+    en: 'English',
+    bn: 'বাংলা (Bengali)',
+    mr: 'मराठी (Marathi)',
+    ta: 'தமிழ் (Tamil)',
+    te: 'తెలుగు (Telugu)',
+    ur: 'اردو (Urdu)',
+  };
+
+  // Fast path 1: Verified built-in Hindi / English
+  if (targetLang === 'hi' && q.question_hi && q.question_hi !== q.question_en) {
+    const opts =
+      Array.isArray(q.options_hi) && q.options_hi.length === 4
+        ? q.options_hi
+        : q.options_en;
+    const exp = q.basic_hi || q.basic_en || '';
+    const data: TranslatedQuestionPayload = {
+      targetLang: 'hi',
+      targetLangLabel: langLabels.hi,
+      questionText: q.question_hi,
+      options: opts,
+      explanation: exp,
+      basicExplanation: exp,
+      trickExplanation: q.trick_hi || q.trick_en,
+      provider: 'verified_bilingual',
+    };
+    return {
+      ok: true,
+      questionText: data.questionText,
+      options: data.options,
+      explanation: exp,
+      provider: data.provider,
+      data,
+    };
+  }
+  if (targetLang === 'en' && q.question_en) {
+    const exp = q.basic_en || '';
+    const data: TranslatedQuestionPayload = {
+      targetLang: 'en',
+      targetLangLabel: langLabels.en,
+      questionText: q.question_en,
+      options: q.options_en,
+      explanation: exp,
+      basicExplanation: exp,
+      trickExplanation: q.trick_en,
+      provider: 'verified_bilingual',
+    };
+    return {
+      ok: true,
+      questionText: data.questionText,
+      options: data.options,
+      explanation: exp,
+      provider: data.provider,
+      data,
+    };
+  }
+
+  // Fast path 2: Check local translation cache
+  const cacheKey = `${q.id}::${targetLang}`;
+  if (typeof window !== 'undefined') {
+    try {
+      const rawCache = localStorage.getItem(TRANSLATION_CACHE_KEY);
+      if (rawCache) {
+        const parsedCache = JSON.parse(rawCache) as Record<string, TranslatedQuestionPayload>;
+        if (parsedCache[cacheKey]) {
+          const cached = parsedCache[cacheKey];
+          return {
+            ok: true,
+            questionText: cached.questionText,
+            options: cached.options,
+            explanation: cached.explanation || cached.basicExplanation || '',
+            provider: cached.provider,
+            data: cached,
+          };
+        }
+      }
+    } catch {
+      // Ignore cache read error
+    }
+  }
+
+  // Path 3: Call backend `/api/translate`
+  const base = resolveApiBaseUrl();
+  try {
+    const res = await fetch(`${base}/api/translate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        questionId: q.id,
+        targetLang,
+        question_en: q.question_en,
+        question_hi: q.question_hi,
+        options_en: q.options_en,
+        options_hi: q.options_hi,
+        basic_en: q.basic_en,
+        basic_hi: q.basic_hi,
+        trick_en: q.trick_en,
+        trick_hi: q.trick_hi,
+      }),
+    });
+    if (!res.ok) {
+      const errData = await res.json().catch(() => ({}));
+      const fallbackText = targetLang === 'hi' ? q.question_hi || q.question_en : q.question_en;
+      const fallbackOpts = targetLang === 'hi' ? q.options_hi || q.options_en : q.options_en;
+      const fallbackExp = targetLang === 'hi' ? q.basic_hi || q.basic_en : q.basic_en;
+      return {
+        ok: false,
+        questionText: fallbackText,
+        options: fallbackOpts,
+        explanation: fallbackExp,
+        provider: 'verified_bilingual',
+        error:
+          errData.error ||
+          `Translation service returned HTTP ${res.status}. Showing verified bilingual content.`,
+      };
+    }
+    const payload = (await res.json()) as {
+      ok: boolean;
+      data?: TranslatedQuestionPayload;
+      error?: string;
+    };
+    const resolvedData: TranslatedQuestionPayload = payload.data || {
+      targetLang,
+      targetLangLabel: langLabels[targetLang] || targetLang,
+      questionText: q.question_hi || q.question_en,
+      options: q.options_hi || q.options_en,
+      explanation: q.basic_hi || q.basic_en,
+      basicExplanation: q.basic_hi || q.basic_en,
+      trickExplanation: q.trick_hi || q.trick_en,
+      provider: 'offline_dictionary',
+    };
+    if (payload.ok && payload.data && typeof window !== 'undefined') {
+      try {
+        const rawCache = localStorage.getItem(TRANSLATION_CACHE_KEY);
+        const parsedCache = rawCache ? JSON.parse(rawCache) : {};
+        parsedCache[cacheKey] = resolvedData;
+        localStorage.setItem(TRANSLATION_CACHE_KEY, JSON.stringify(parsedCache));
+      } catch {
+        // Ignore
+      }
+    }
+    return {
+      ok: payload.ok,
+      questionText: resolvedData.questionText,
+      options: resolvedData.options,
+      explanation: resolvedData.explanation || resolvedData.basicExplanation || '',
+      provider: resolvedData.provider,
+      data: resolvedData,
+      error: payload.error,
+    };
+  } catch {
+    const fallbackText = q.question_hi || q.question_en;
+    const fallbackOpts = q.options_hi || q.options_en;
+    const fallbackExp = q.basic_hi || q.basic_en;
+    return {
+      ok: true,
+      questionText: fallbackText,
+      options: fallbackOpts,
+      explanation: fallbackExp,
+      provider: 'verified_bilingual',
+    };
+  }
+}
+

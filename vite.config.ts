@@ -4,8 +4,8 @@ import path from 'path';
 import { defineConfig } from 'vite';
 import { VitePWA } from 'vite-plugin-pwa';
 
-export default defineConfig(() => {
-  const basePath = process.env.VITE_BASE_PATH || './';
+export default defineConfig(({ command }) => {
+  const basePath = process.env.VITE_BASE_PATH || (command === 'build' ? './' : '/');
 
   return {
     base: basePath,
@@ -88,8 +88,7 @@ export default defineConfig(() => {
           ],
         },
         devOptions: {
-          enabled: true,
-          type: 'module',
+          enabled: false,
         },
       }),
     ],
@@ -99,8 +98,8 @@ export default defineConfig(() => {
       },
     },
     server: {
-      hmr: process.env.DISABLE_HMR !== 'true',
-      watch: process.env.DISABLE_HMR === 'true' ? null : {},
+      hmr: false,
+      watch: process.env.DISABLE_HMR === 'true' ? null : undefined,
     },
   };
 });

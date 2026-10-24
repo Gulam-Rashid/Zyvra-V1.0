@@ -150,6 +150,21 @@ export function verifyProKeyForDevice(
 }
 
 // ============================================================================
+// STUDENT REFERRAL CODE GENERATOR (Deterministic & Unique per Device ID)
+// ============================================================================
+
+export function generateReferralCode(deviceId: string): string {
+  const clean = (deviceId || 'ZYV-1000-AAA').trim().toUpperCase();
+  const h = computeDeterministicHash(`ZYVRA_REF_2026::${clean}`);
+  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  const c1 = alphabet[h % alphabet.length];
+  const c2 = alphabet[(h >>> 5) % alphabet.length];
+  const c3 = alphabet[(h >>> 10) % alphabet.length];
+  const digits = String((h % 900) + 100);
+  return `ZYVREF-${digits}${c1}${c2}${c3}`;
+}
+
+// ============================================================================
 // ADMIN AUTHENTICATION & SESSION MANAGEMENT
 // No hardcoded login IDs or passcodes are stored in frontend source code.
 // ============================================================================
@@ -184,28 +199,46 @@ function generateRandomHexSalt(bytesLength = 16): string {
   return `${Date.now().toString(16)}-${Math.random().toString(16).slice(2)}`;
 }
 
+/**
+ * Mobile-safe deterministic multi-round salted hash fallback when Web Crypto (`crypto.subtle`)
+ * is unavailable on non-HTTPS mobile LAN IPs or custom Android WebView origins, while using
+ * native SHA-256 whenever available.
+ */
 async function computeSha256Hex(message: string): Promise<string> {
   if (typeof window !== 'undefined' && window.crypto?.subtle) {
-    const encoder = new TextEncoder();
-    const data = encoder.encode(message);
-    const hashBuffer = await window.crypto.subtle.digest('SHA-256', data);
-    const hashArray = Array.from(new Uint8Array(hashBuffer));
-    return hashArray.map((b) => b.toString(16).padStart(2, '0')).join('');
+    try {
+      const encoder = new TextEncoder();
+      const data = encoder.encode(message);
+      const hashBuffer = await window.crypto.subtle.digest('SHA-256', data);
+      const hashArray = Array.from(new Uint8Array(hashBuffer));
+      return hashArray.map((b) => b.toString(16).padStart(2, '0')).join('');
+    } catch {
+      // Fall through to deterministic multi-round fallback
+    }
   }
-  // Fallback deterministic multi-round hash if Web Crypto is unavailable
-  const h1 = computeDeterministicHash(`R1::${message}`).toString(16);
-  const h2 = computeDeterministicHash(`R2::${message.split('').reverse().join('')}`).toString(16);
-  return `${h1}-${h2}`;
+  const h1 = computeDeterministicHash(`R1::${message}`).toString(16).padStart(8, '0');
+  const h2 = computeDeterministicHash(
+    `R2::${message.split('').reverse().join('')}`
+  )
+    .toString(16)
+    .padStart(8, '0');
+  const h3 = computeDeterministicHash(`R3::${h1}::${message}::${h2}`)
+    .toString(16)
+    .padStart(8, '0');
+  return `${h1}${h2}${h3}`;
 }
 
 export function getActiveAdminSession(): AdminSession | null {
   if (typeof window === 'undefined') return null;
   try {
-    const raw = sessionStorage.getItem(ADMIN_SESSION_STORAGE_KEY);
+    const raw =
+      sessionStorage.getItem(ADMIN_SESSION_STORAGE_KEY) ||
+      localStorage.getItem(ADMIN_SESSION_STORAGE_KEY);
     if (!raw) return null;
     const parsed = JSON.parse(raw) as AdminSession;
     if (!parsed || Date.now() > parsed.expiresAt) {
       sessionStorage.removeItem(ADMIN_SESSION_STORAGE_KEY);
+      localStorage.removeItem(ADMIN_SESSION_STORAGE_KEY);
       return null;
     }
     return parsed;
@@ -216,12 +249,31 @@ export function getActiveAdminSession(): AdminSession | null {
 
 export function saveAdminSession(session: AdminSession): void {
   if (typeof window === 'undefined') return;
-  sessionStorage.setItem(ADMIN_SESSION_STORAGE_KEY, JSON.stringify(session));
+  const serialized = JSON.stringify(session);
+  try {
+    sessionStorage.setItem(ADMIN_SESSION_STORAGE_KEY, serialized);
+  } catch {
+    // Ignore quota/security errors in restricted mobile webviews
+  }
+  try {
+    localStorage.setItem(ADMIN_SESSION_STORAGE_KEY, serialized);
+  } catch {
+    // Ignore quota/security errors
+  }
 }
 
 export function clearAdminSession(): void {
   if (typeof window === 'undefined') return;
-  sessionStorage.removeItem(ADMIN_SESSION_STORAGE_KEY);
+  try {
+    sessionStorage.removeItem(ADMIN_SESSION_STORAGE_KEY);
+  } catch {
+    // Ignore
+  }
+  try {
+    localStorage.removeItem(ADMIN_SESSION_STORAGE_KEY);
+  } catch {
+    // Ignore
+  }
 }
 
 /**
